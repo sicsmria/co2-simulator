@@ -2,7 +2,7 @@ import math
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Circle, FancyBboxPatch
 
 # -----------------------------
 # Page config
@@ -48,6 +48,7 @@ ACTIVITY_LEVELS = {
     },
 }
 
+POSTURE_ORDER = ["standing", "seated", "lying"]
 
 # -----------------------------
 # Helper functions
@@ -62,36 +63,70 @@ def get_posture_volume(posture: str) -> float:
     return spec["width_m"] * spec["depth_m"] * spec["height_m"]
 
 
-def estimate_capacity_by_posture(length_m: float, width_m: float, posture: str, packing_factor: float = 1.3) -> int:
-    floor_area_m2 = length_m * width_m
-    area_per_person = get_posture_area(posture) * packing_factor
+def posture_total_people(groups: dict) -> int:
+    return sum(groups[p]["count"] for p in POSTURE_ORDER)
+
+
+def total_co2_generation_m3s(groups: dict) -> float:
+    total = 0.0
+    for posture in POSTURE_ORDER:
+        count = groups[posture]["count"]
+        activity = groups[posture]["activity"]
+        lps = ACTIVITY_LEVELS[activity]["co2_gen_lps_per_person"]
+        total += count * (lps / 1000.0)  # L/s -> m3/s
+    return total
+
+
+def estimate_mixed_capacity(length_m: float, width_m: float, groups: dict, packing_factor: float = 1.3) -> int:
+    """
+    Approximate capacity by using weighted average area of actual occupant mix.
+    """
+    total_people = posture_total_people(groups)
+    floor_area = length_m * width_m
+    if total_people == 0:
+        return 0
+
+    weighted_area = 0.0
+    for posture in POSTURE_ORDER:
+        weighted_area += groups[posture]["count"] * get_posture_area(posture)
+
+    avg_area = weighted_area / total_people
+    area_per_person = avg_area * packing_factor
     if area_per_person <= 0:
         return 0
-    return int(floor_area_m2 // area_per_person)
+
+    return int(floor_area // area_per_person)
 
 
 def simulate_co2(
     volume_m3: float,
     ventilation_m3_per_h: float,
-    occupants: int,
-    activity: str,
+    groups: dict,
     outdoor_co2_ppm: float = 420.0,
     initial_co2_ppm: float = 420.0,
     duration_min: int = 180,
     dt_sec: int = 60,
 ):
+    """
+    Single-zone CO2 mass balance model:
+    dC/dt = G/V - Q/V * (C - Cout)
+    """
     co2_ppm = initial_co2_ppm
     results = []
 
-    Q = ventilation_m3_per_h / 3600.0
-    co2_gen_per_person_m3s = ACTIVITY_LEVELS[activity]["co2_gen_lps_per_person"] / 1000.0
-    G = occupants * co2_gen_per_person_m3s
+    Q = ventilation_m3_per_h / 3600.0  # m3/s
+    G = total_co2_generation_m3s(groups)
 
     steps = int(duration_min * 60 / dt_sec)
 
     for step in range(steps + 1):
         time_min = step * dt_sec / 60.0
-        results.append({"time_min": time_min, "co2_ppm": co2_ppm})
+        results.append(
+            {
+                "time_min": time_min,
+                "co2_ppm": co2_ppm,
+            }
+        )
 
         c_in = co2_ppm / 1_000_000.0
         c_out = outdoor_co2_ppm / 1_000_000.0
@@ -107,9 +142,7 @@ def run_shelter_simulation(
     length_m: float,
     width_m: float,
     height_m: float,
-    posture: str,
-    activity: str,
-    occupants: int,
+    groups: dict,
     ventilation_m3_per_h: float,
     outdoor_co2_ppm: float = 420.0,
     initial_co2_ppm: float = 420.0,
@@ -118,21 +151,21 @@ def run_shelter_simulation(
 ):
     floor_area_m2 = length_m * width_m
     volume_m3 = floor_area_m2 * height_m
+    total_people = posture_total_people(groups)
 
-    capacity = estimate_capacity_by_posture(
+    capacity = estimate_mixed_capacity(
         length_m=length_m,
         width_m=width_m,
-        posture=posture,
+        groups=groups,
         packing_factor=packing_factor,
     )
 
-    overcrowded = occupants > capacity
+    overcrowded = total_people > capacity if capacity > 0 else total_people > 0
 
     sim_results = simulate_co2(
         volume_m3=volume_m3,
         ventilation_m3_per_h=ventilation_m3_per_h,
-        occupants=occupants,
-        activity=activity,
+        groups=groups,
         outdoor_co2_ppm=outdoor_co2_ppm,
         initial_co2_ppm=initial_co2_ppm,
         duration_min=duration_min,
@@ -143,8 +176,7 @@ def run_shelter_simulation(
         "volume_m3": volume_m3,
         "capacity": capacity,
         "overcrowded": overcrowded,
-        "posture_area_m2_per_person": get_posture_area(posture),
-        "posture_volume_m3_per_person": get_posture_volume(posture),
+        "total_people": total_people,
         "results": sim_results,
     }
 
@@ -156,123 +188,285 @@ def get_threshold_crossing_time(df: pd.DataFrame, threshold: float):
     return float(crossed.iloc[0]["time_min"])
 
 
-def compute_layout(length_m: float, width_m: float, posture: str, packing_factor: float):
-    """
-    Returns layout info for drawing occupants in top view.
-    """
+def expand_dims_with_packing(posture: str, packing_factor: float):
     spec = POSTURE_SPECS[posture]
-    occ_w = spec["width_m"] * math.sqrt(packing_factor)
-    occ_d = spec["depth_m"] * math.sqrt(packing_factor)
-
-    n_cols = max(1, int(length_m // occ_d))
-    n_rows = max(1, int(width_m // occ_w))
-    capacity = n_cols * n_rows
-
+    scale = math.sqrt(packing_factor)
     return {
-        "occ_w": occ_w,
-        "occ_d": occ_d,
-        "n_cols": n_cols,
-        "n_rows": n_rows,
-        "capacity": capacity,
+        "width": spec["width_m"] * scale,
+        "depth": spec["depth_m"] * scale,
+        "height": spec["height_m"],
     }
 
 
-def draw_top_view(length_m: float, width_m: float, posture: str, occupants: int, packing_factor: float):
-    spec = POSTURE_SPECS[posture]
-    layout = compute_layout(length_m, width_m, posture, packing_factor)
+# -----------------------------
+# Layout generation
+# -----------------------------
+def generate_occupant_positions(length_m: float, width_m: float, groups: dict, packing_factor: float):
+    """
+    Simple row packing from top to bottom by posture type.
+    Returns placed occupants and overflow count.
+    """
+    placed = []
+    overflow = 0
 
-    occ_w = layout["occ_w"]
-    occ_d = layout["occ_d"]
-    n_cols = layout["n_cols"]
-    n_rows = layout["n_rows"]
-    capacity = layout["capacity"]
+    current_y = width_m
+    gap_y = 0.15
+    gap_x = 0.10
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    for posture in POSTURE_ORDER:
+        count = groups[posture]["count"]
+        if count <= 0:
+            continue
 
-    # Room boundary
-    ax.add_patch(Rectangle((0, 0), length_m, width_m, fill=False, linewidth=2))
+        dims = expand_dims_with_packing(posture, packing_factor)
+        occ_w = dims["width"]
+        occ_d = dims["depth"]
 
-    # Draw occupants
-    max_draw = min(occupants, capacity)
-    count = 0
+        band_h = occ_w + gap_y
+        current_y -= band_h
+        if current_y < 0:
+            overflow += count
+            continue
 
-    x_margin = max(0.0, (length_m - n_cols * occ_d) / 2)
-    y_margin = max(0.0, (width_m - n_rows * occ_w) / 2)
+        usable_length = max(length_m - 0.2, 0.0)
+        per_row = max(1, int((usable_length + gap_x) // (occ_d + gap_x)))
 
-    for row in range(n_rows):
-        for col in range(n_cols):
-            if count >= max_draw:
+        row_count = 0
+        col_count = 0
+        placed_for_posture = 0
+
+        while placed_for_posture < count:
+            y = current_y - row_count * band_h
+            if y < 0:
+                overflow += (count - placed_for_posture)
                 break
-            x = x_margin + col * occ_d
-            y = y_margin + row * occ_w
 
-            ax.add_patch(
-                Rectangle(
-                    (x, y),
-                    spec["depth_m"],
-                    spec["width_m"],
-                    alpha=0.6,
-                )
+            x = 0.1 + col_count * (occ_d + gap_x)
+
+            if x + occ_d > length_m - 0.1:
+                row_count += 1
+                col_count = 0
+                continue
+
+            placed.append(
+                {
+                    "posture": posture,
+                    "x": x,
+                    "y": y,
+                    "draw_depth": POSTURE_SPECS[posture]["depth_m"],
+                    "draw_width": POSTURE_SPECS[posture]["width_m"],
+                    "height": POSTURE_SPECS[posture]["height_m"],
+                }
             )
-            count += 1
-        if count >= max_draw:
-            break
 
-    ax.set_xlim(0, length_m)
-    ax.set_ylim(0, width_m)
+            placed_for_posture += 1
+            col_count += 1
+
+        current_y -= max(0, row_count) * band_h + 0.10
+
+    return placed, overflow
+
+
+# -----------------------------
+# Drawing helpers
+# -----------------------------
+def draw_person_top(ax, posture: str, x: float, y: float, depth_m: float, width_m: float):
+    """
+    Pretty top-view glyph while respecting outer footprint.
+    """
+    body = FancyBboxPatch(
+        (x, y),
+        depth_m,
+        width_m,
+        boxstyle="round,pad=0.01,rounding_size=0.05",
+        linewidth=1.0,
+        fill=False,
+    )
+    ax.add_patch(body)
+
+    if posture == "standing":
+        r = min(depth_m, width_m) * 0.18
+        cx = x + depth_m * 0.5
+        cy = y + width_m * 0.5
+        ax.add_patch(Circle((cx, cy), r, fill=False, linewidth=1.0))
+        ax.plot([cx, cx], [cy - r, y + width_m * 0.20], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.25], [cy - r * 0.2, y + width_m * 0.40], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.75], [cy - r * 0.2, y + width_m * 0.40], linewidth=1.0)
+
+    elif posture == "seated":
+        head_r = min(depth_m, width_m) * 0.14
+        ax.add_patch(Circle((x + depth_m * 0.28, y + width_m * 0.72), head_r, fill=False, linewidth=1.0))
+        ax.plot([x + depth_m * 0.28, x + depth_m * 0.42], [y + width_m * 0.60, y + width_m * 0.38], linewidth=1.0)
+        ax.plot([x + depth_m * 0.42, x + depth_m * 0.70], [y + width_m * 0.38, y + width_m * 0.38], linewidth=1.0)
+        ax.plot([x + depth_m * 0.68, x + depth_m * 0.68], [y + width_m * 0.38, y + width_m * 0.70], linewidth=1.0)
+
+    elif posture == "lying":
+        head_r = min(depth_m, width_m) * 0.18
+        ax.add_patch(Circle((x + depth_m * 0.15, y + width_m * 0.50), head_r, fill=False, linewidth=1.0))
+        ax.plot([x + depth_m * 0.28, x + depth_m * 0.85], [y + width_m * 0.50, y + width_m * 0.50], linewidth=1.0)
+        ax.plot([x + depth_m * 0.55, x + depth_m * 0.78], [y + width_m * 0.50, y + width_m * 0.72], linewidth=1.0)
+        ax.plot([x + depth_m * 0.55, x + depth_m * 0.78], [y + width_m * 0.50, y + width_m * 0.28], linewidth=1.0)
+
+
+def draw_person_side(ax, posture: str, x: float, baseline: float, depth_m: float, height_m: float):
+    """
+    Pretty side-view glyph while respecting outer depth/height.
+    """
+    frame = FancyBboxPatch(
+        (x, baseline),
+        depth_m,
+        height_m,
+        boxstyle="round,pad=0.01,rounding_size=0.04",
+        linewidth=0.8,
+        fill=False,
+        alpha=0.7,
+    )
+    ax.add_patch(frame)
+
+    if posture == "standing":
+        head_r = min(depth_m, height_m) * 0.10
+        cx = x + depth_m * 0.5
+        cy = baseline + height_m * 0.85
+        ax.add_patch(Circle((cx, cy), head_r, fill=False, linewidth=1.0))
+        ax.plot([cx, cx], [baseline + height_m * 0.28, cy - head_r], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.25], [baseline + height_m * 0.62, baseline + height_m * 0.48], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.75], [baseline + height_m * 0.62, baseline + height_m * 0.48], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.30], [baseline + height_m * 0.28, baseline], linewidth=1.0)
+        ax.plot([cx, x + depth_m * 0.70], [baseline + height_m * 0.28, baseline], linewidth=1.0)
+
+    elif posture == "seated":
+        head_r = min(depth_m, height_m) * 0.10
+        ax.add_patch(Circle((x + depth_m * 0.30, baseline + height_m * 0.80), head_r, fill=False, linewidth=1.0))
+        ax.plot([x + depth_m * 0.30, x + depth_m * 0.45], [baseline + height_m * 0.68, baseline + height_m * 0.45], linewidth=1.0)
+        ax.plot([x + depth_m * 0.45, x + depth_m * 0.75], [baseline + height_m * 0.45, baseline + height_m * 0.45], linewidth=1.0)
+        ax.plot([x + depth_m * 0.72, x + depth_m * 0.72], [baseline + height_m * 0.45, baseline + height_m * 0.15], linewidth=1.0)
+        ax.plot([x + depth_m * 0.45, x + depth_m * 0.60], [baseline + height_m * 0.45, baseline + height_m * 0.10], linewidth=1.0)
+        ax.plot([x + depth_m * 0.60, x + depth_m * 0.80], [baseline + height_m * 0.10, baseline + height_m * 0.10], linewidth=1.0)
+
+    elif posture == "lying":
+        head_r = min(depth_m, height_m) * 0.18
+        ax.add_patch(Circle((x + depth_m * 0.12, baseline + height_m * 0.55), head_r, fill=False, linewidth=1.0))
+        ax.plot([x + depth_m * 0.22, x + depth_m * 0.82], [baseline + height_m * 0.50, baseline + height_m * 0.50], linewidth=1.0)
+        ax.plot([x + depth_m * 0.52, x + depth_m * 0.74], [baseline + height_m * 0.50, baseline + height_m * 0.66], linewidth=1.0)
+        ax.plot([x + depth_m * 0.52, x + depth_m * 0.74], [baseline + height_m * 0.50, baseline + height_m * 0.34], linewidth=1.0)
+
+
+def draw_top_view(length_m: float, width_m: float, groups: dict, packing_factor: float):
+    placed, overflow = generate_occupant_positions(length_m, width_m, groups, packing_factor)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    room = FancyBboxPatch(
+        (0, 0),
+        length_m,
+        width_m,
+        boxstyle="round,pad=0.02,rounding_size=0.15",
+        linewidth=2.0,
+        fill=False,
+    )
+    ax.add_patch(room)
+
+    for occ in placed:
+        draw_person_top(
+            ax=ax,
+            posture=occ["posture"],
+            x=occ["x"],
+            y=occ["y"],
+            depth_m=occ["draw_depth"],
+            width_m=occ["draw_width"],
+        )
+
+    # Labels
+    legend_y = width_m + max(width_m * 0.03, 0.2)
+    legend_text = (
+        f"Standing: {groups['standing']['count']}   "
+        f"Seated: {groups['seated']['count']}   "
+        f"Lying: {groups['lying']['count']}"
+    )
+    ax.text(length_m * 0.02, legend_y, legend_text, fontsize=10)
+
+    if overflow > 0:
+        ax.text(
+            length_m * 0.5,
+            width_m * 0.5,
+            f"Overflow: {overflow} person(s)",
+            ha="center",
+            va="center",
+            fontsize=12,
+            bbox=dict(facecolor="white", alpha=0.85),
+        )
+
+    ax.set_xlim(-0.2, length_m + 0.2)
+    ax.set_ylim(-0.2, width_m + max(width_m * 0.10, 0.5))
     ax.set_aspect("equal", adjustable="box")
     ax.set_title("Top View Layout")
     ax.set_xlabel("Length (m)")
     ax.set_ylabel("Width (m)")
-    ax.grid(True, alpha=0.3)
-
-    if occupants > capacity:
-        ax.text(
-            length_m * 0.5,
-            width_m * 0.5,
-            f"Over capacity\nShown: {capacity}/{occupants}",
-            ha="center",
-            va="center",
-            fontsize=12,
-            bbox=dict(facecolor="white", alpha=0.8),
-        )
+    ax.grid(True, alpha=0.25)
 
     return fig
 
 
-def draw_side_view(length_m: float, height_m: float, posture: str, occupants: int, packing_factor: float):
-    spec = POSTURE_SPECS[posture]
-    layout = compute_layout(length_m, 1.0, posture, packing_factor)  # only use along length
-    occ_d = layout["occ_d"]
-    n_cols = max(1, int(length_m // occ_d))
+def draw_side_view(length_m: float, height_m: float, groups: dict, packing_factor: float):
+    fig, ax = plt.subplots(figsize=(9, 4.8))
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    room = FancyBboxPatch(
+        (0, 0),
+        length_m,
+        height_m,
+        boxstyle="round,pad=0.02,rounding_size=0.10",
+        linewidth=2.0,
+        fill=False,
+    )
+    ax.add_patch(room)
 
-    # Room boundary
-    ax.add_patch(Rectangle((0, 0), length_m, height_m, fill=False, linewidth=2))
+    total = posture_total_people(groups)
+    if total == 0:
+        total = 1
 
-    # Draw simplified occupants along length
-    shown_people = min(occupants, n_cols, 20)
-    x_margin = max(0.0, (length_m - shown_people * occ_d) / 2)
+    visible_limit = 24
+    visible_people = min(posture_total_people(groups), visible_limit)
 
-    for i in range(shown_people):
-        x = x_margin + i * occ_d
-        ax.add_patch(
-            Rectangle(
-                (x, 0),
-                spec["depth_m"],
-                spec["height_m"],
-                alpha=0.6,
+    if visible_people > 0:
+        x_cursor = 0.3
+        x_gap = max(length_m / max(visible_people + 2, 6), 0.45)
+
+        sequence = []
+        for posture in POSTURE_ORDER:
+            sequence.extend([posture] * groups[posture]["count"])
+        sequence = sequence[:visible_people]
+
+        for posture in sequence:
+            spec = POSTURE_SPECS[posture]
+            depth = min(spec["depth_m"], x_gap * 0.8)
+            x = x_cursor
+            draw_person_side(
+                ax=ax,
+                posture=posture,
+                x=x,
+                baseline=0.0,
+                depth_m=depth,
+                height_m=spec["height_m"],
             )
+            x_cursor += x_gap
+            if x_cursor > length_m - 0.4:
+                break
+
+    if posture_total_people(groups) > visible_limit:
+        ax.text(
+            length_m * 0.98,
+            height_m * 0.95,
+            f"Showing first {visible_limit} people",
+            ha="right",
+            va="top",
+            fontsize=9,
         )
 
-    ax.set_xlim(0, length_m)
-    ax.set_ylim(0, max(height_m * 1.05, spec["height_m"] * 1.2))
-    ax.set_aspect("auto")
+    ax.set_xlim(-0.2, length_m + 0.2)
+    ax.set_ylim(0, max(height_m * 1.08, 2.2))
     ax.set_title("Side View Section")
     ax.set_xlabel("Length (m)")
     ax.set_ylabel("Height (m)")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
     return fig
 
@@ -281,36 +475,55 @@ def draw_side_view(length_m: float, height_m: float, posture: str, occupants: in
 # UI
 # -----------------------------
 st.title("Subway Shelter CO₂ Simulation")
-st.caption("Automatic update + geometric room input + occupant layout view")
+st.caption("ISO 7250-based simplified geometry with mixed postures, automatic update, and visual layout")
 
-left, right = st.columns([1, 1])
+col_left, col_right = st.columns([1, 1])
 
-with left:
+with col_left:
     st.subheader("1. Space geometry")
     length_m = st.number_input("Length (m)", min_value=1.0, value=20.0, step=1.0)
     width_m = st.number_input("Width (m)", min_value=1.0, value=10.0, step=1.0)
     height_m = st.number_input("Height (m)", min_value=1.0, value=3.5, step=0.1)
 
-    st.subheader("2. Occupant settings")
-    posture = st.selectbox(
-        "Occupant posture",
-        options=["standing", "seated", "lying"],
-        format_func=lambda x: POSTURE_SPECS[x]["label"],
-    )
-    activity = st.selectbox(
-        "Occupant activity state",
+    st.subheader("2. Occupants")
+
+    standing_count = st.number_input("Standing people", min_value=0, value=40, step=1)
+    standing_activity = st.selectbox(
+        "Standing activity",
         options=["stable", "crowded", "moving"],
         format_func=lambda x: ACTIVITY_LEVELS[x]["label"],
+        key="standing_activity",
     )
-    occupants = st.number_input("Number of occupants", min_value=1, value=100, step=1)
-    packing_factor = st.slider("Packing factor", min_value=1.0, max_value=2.0, value=1.3, step=0.05)
 
-with right:
+    seated_count = st.number_input("Seated people", min_value=0, value=20, step=1)
+    seated_activity = st.selectbox(
+        "Seated activity",
+        options=["stable", "crowded", "moving"],
+        format_func=lambda x: ACTIVITY_LEVELS[x]["label"],
+        key="seated_activity",
+    )
+
+    lying_count = st.number_input("Lying people", min_value=0, value=10, step=1)
+    lying_activity = st.selectbox(
+        "Lying activity",
+        options=["stable", "crowded", "moving"],
+        format_func=lambda x: ACTIVITY_LEVELS[x]["label"],
+        key="lying_activity",
+    )
+
+with col_right:
     st.subheader("3. Ventilation / CO₂ settings")
     ventilation_m3_per_h = st.number_input("Ventilation rate (m³/h)", min_value=0.0, value=5000.0, step=100.0)
     outdoor_co2_ppm = st.number_input("Outdoor CO₂ (ppm)", min_value=300.0, value=420.0, step=10.0)
     initial_co2_ppm = st.number_input("Initial indoor CO₂ (ppm)", min_value=300.0, value=420.0, step=10.0)
     duration_min = st.slider("Simulation duration (min)", min_value=10, max_value=720, value=180, step=10)
+    packing_factor = st.slider("Packing factor", min_value=1.0, max_value=2.0, value=1.3, step=0.05)
+
+groups = {
+    "standing": {"count": int(standing_count), "activity": standing_activity},
+    "seated": {"count": int(seated_count), "activity": seated_activity},
+    "lying": {"count": int(lying_count), "activity": lying_activity},
+}
 
 # -----------------------------
 # Run automatically
@@ -319,9 +532,7 @@ output = run_shelter_simulation(
     length_m=length_m,
     width_m=width_m,
     height_m=height_m,
-    posture=posture,
-    activity=activity,
-    occupants=occupants,
+    groups=groups,
     ventilation_m3_per_h=ventilation_m3_per_h,
     outdoor_co2_ppm=outdoor_co2_ppm,
     initial_co2_ppm=initial_co2_ppm,
@@ -340,46 +551,60 @@ t_3000 = get_threshold_crossing_time(df, 3000)
 # -----------------------------
 st.subheader("Simulation Summary")
 
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1:
+m1, m2, m3, m4, m5 = st.columns(5)
+with m1:
     st.metric("Floor area", f"{output['floor_area_m2']:.1f} m²")
-with c2:
+with m2:
     st.metric("Volume", f"{output['volume_m3']:.1f} m³")
-with c3:
-    st.metric("Area / person", f"{output['posture_area_m2_per_person']:.2f} m²")
-with c4:
-    st.metric("Estimated capacity", f"{output['capacity']} persons")
-with c5:
-    st.metric("Density", f"{occupants / output['floor_area_m2']:.2f} persons/m²")
+with m3:
+    st.metric("Total people", f"{output['total_people']}")
+with m4:
+    st.metric("Estimated capacity", f"{output['capacity']}")
+with m5:
+    density = output["total_people"] / output["floor_area_m2"] if output["floor_area_m2"] > 0 else 0
+    st.metric("Density", f"{density:.2f} persons/m²")
 
 if output["overcrowded"]:
-    st.error("Occupancy exceeds estimated posture-based capacity.")
+    st.error("Occupancy exceeds estimated mixed-posture capacity.")
 else:
-    st.success("Occupancy is within estimated posture-based capacity.")
+    st.success("Occupancy is within estimated mixed-posture capacity.")
 
 # -----------------------------
-# Layout visualization
+# Per-posture info
+# -----------------------------
+st.subheader("Per-Posture Settings Summary")
+
+info_cols = st.columns(3)
+for idx, posture in enumerate(POSTURE_ORDER):
+    spec = POSTURE_SPECS[posture]
+    with info_cols[idx]:
+        st.markdown(f"**{spec['label']}**")
+        st.write(f"Count: {groups[posture]['count']}")
+        st.write(f"Activity: {ACTIVITY_LEVELS[groups[posture]['activity']]['label']}")
+        st.write(f"Footprint: {spec['depth_m']:.2f} m × {spec['width_m']:.2f} m")
+        st.write(f"Height: {spec['height_m']:.2f} m")
+
+# -----------------------------
+# Visualization
 # -----------------------------
 st.subheader("Space and Occupant Visualization")
 
-viz_col1, viz_col2 = st.columns(2)
+v1, v2 = st.columns(2)
 
-with viz_col1:
+with v1:
     top_fig = draw_top_view(
         length_m=length_m,
         width_m=width_m,
-        posture=posture,
-        occupants=occupants,
+        groups=groups,
         packing_factor=packing_factor,
     )
     st.pyplot(top_fig)
 
-with viz_col2:
+with v2:
     side_fig = draw_side_view(
         length_m=length_m,
         height_m=height_m,
-        posture=posture,
-        occupants=occupants,
+        groups=groups,
         packing_factor=packing_factor,
     )
     st.pyplot(side_fig)
@@ -389,12 +614,12 @@ with viz_col2:
 # -----------------------------
 st.subheader("Threshold Crossing Time")
 
-tcol1, tcol2, tcol3 = st.columns(3)
-with tcol1:
+t1, t2, t3 = st.columns(3)
+with t1:
     st.metric("1000 ppm", "Not reached" if t_1000 is None else f"{t_1000:.1f} min")
-with tcol2:
+with t2:
     st.metric("2000 ppm", "Not reached" if t_2000 is None else f"{t_2000:.1f} min")
-with tcol3:
+with t3:
     st.metric("3000 ppm", "Not reached" if t_3000 is None else f"{t_3000:.1f} min")
 
 # -----------------------------
@@ -407,9 +632,9 @@ x = df["time_min"]
 y = df["co2_ppm"]
 
 ax.axhspan(0, 1000, alpha=0.10)
-ax.axhspan(1000, 2000, alpha=0.15)
-ax.axhspan(2000, 3000, alpha=0.20)
-ax.axhspan(3000, max(4000, y.max() * 1.05), alpha=0.25)
+ax.axhspan(1000, 2000, alpha=0.14)
+ax.axhspan(2000, 3000, alpha=0.18)
+ax.axhspan(3000, max(4000, y.max() * 1.05), alpha=0.24)
 
 ax.plot(x, y, linewidth=2)
 ax.axhline(1000, linestyle="--", linewidth=1)
