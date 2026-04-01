@@ -44,13 +44,13 @@ st.title("Indoor CO₂ & Spatial Occupancy Simulator")
 # -----------------------------
 st.sidebar.header("Settings")
 
-width = st.sidebar.slider("Room Width (m)", 5, 50, 12)
-length = st.sidebar.slider("Room Length (m)", 5, 50, 10)
+width = st.sidebar.slider("Room Width (m)", 5, 3000, 12)
+length = st.sidebar.slider("Room Length (m)", 5, 100, 10)
 height = st.sidebar.slider("Room Height (m)", 2, 6, 3)
 
-standing = st.sidebar.slider("Standing People", 0, 300, 15)
-sitting = st.sidebar.slider("Sitting People", 0, 300, 30)
-lying = st.sidebar.slider("Lying People", 0, 300, 5)
+standing = st.sidebar.slider("Standing People", 0, 3000, 15)
+sitting = st.sidebar.slider("Sitting People", 0, 3000, 30)
+lying = st.sidebar.slider("Lying People", 0, 3000, 5)
 
 activity_state = st.sidebar.selectbox(
     "Activity State",
@@ -58,7 +58,7 @@ activity_state = st.sidebar.selectbox(
     index=0
 )
 
-airflow = st.sidebar.slider("HVAC Airflow (m³/h)", 0, 5000, 350)
+airflow = st.sidebar.slider("HVAC Airflow (m³/h)", 0, 200000, 350)
 time_total = st.sidebar.slider("Simulation Time (min)", 30, 720, 180)
 seed = st.sidebar.number_input("Random Seed", 0, 99999, 42)
 
