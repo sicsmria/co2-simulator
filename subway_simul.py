@@ -177,14 +177,14 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
 
     # Heatmap
     if C is not None:
-        x_edges = np.linspace(0, room_w, nx + 1)
-        y_edges = np.linspace(0, room_d, ny + 1)
+        x_centers = [(i + 0.5) * cell_size for i in range(nx)]
+        y_centers = [(j + 0.5) * cell_size for j in range(ny)]
 
         fig.add_trace(
             go.Heatmap(
                 z=C.T,
-                x=x_edges[:-1] + cell_size / 2,
-                y=y_edges[:-1] + cell_size / 2,
+                x=x_centers,
+                y=y_centers,
                 colorscale="RdYlBu_r",
                 zmin=400,
                 zmax=3000,
@@ -193,48 +193,26 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
             )
         )
 
-        # Risk contour style substitute
-        risk_x = []
-        risk_y = []
-        for i in range(nx):
-            for j in range(ny):
-                if C[i, j] > 1000:
-                    x, y = idx_to_pos(i, j, cell_size)
-                    risk_x.append(x)
-                    risk_y.append(y)
-
-        if risk_x:
-            fig.add_trace(
-                go.Scatter(
-                    x=risk_x,
-                    y=risk_y,
-                    mode="markers",
-                    marker=dict(symbol="square-open", size=12, line=dict(width=1)),
-                    name="Risk >1000 ppm",
-                    hoverinfo="skip"
-                )
-            )
-
-    # Invisible clickable grid points
-    click_x = []
-    click_y = []
-    custom = []
+    # Clickable grid points
+    grid_x = []
+    grid_y = []
+    grid_custom = []
     for i in range(nx):
         for j in range(ny):
             x, y = idx_to_pos(i, j, cell_size)
-            click_x.append(x)
-            click_y.append(y)
-            custom.append([round(x, 3), round(y, 3)])
+            grid_x.append(x)
+            grid_y.append(y)
+            grid_custom.append(["grid", round(x, 3), round(y, 3)])
 
     fig.add_trace(
         go.Scatter(
-            x=click_x,
-            y=click_y,
+            x=grid_x,
+            y=grid_y,
             mode="markers",
-            marker=dict(size=18, opacity=0.01),
-            customdata=custom,
-            name="Click targets",
-            hovertemplate="Click to add vent<br>x=%{customdata[0]:.2f} m<br>y=%{customdata[1]:.2f} m<extra></extra>"
+            marker=dict(size=10, opacity=0.18, symbol="circle"),
+            customdata=grid_custom,
+            name="Grid click points",
+            hovertemplate="Add vent here<br>x=%{customdata[1]:.2f} m<br>y=%{customdata[2]:.2f} m<extra></extra>"
         )
     )
 
@@ -252,7 +230,8 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
                 x=standing_x, y=standing_y,
                 mode="markers",
                 marker=dict(symbol="circle", size=10),
-                name="Standing"
+                name="Standing",
+                hoverinfo="skip"
             )
         )
 
@@ -262,7 +241,8 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
                 x=sitting_x, y=sitting_y,
                 mode="markers",
                 marker=dict(symbol="square", size=10),
-                name="Sitting"
+                name="Sitting",
+                hoverinfo="skip"
             )
         )
 
@@ -272,25 +252,46 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
                 x=lying_x, y=lying_y,
                 mode="markers",
                 marker=dict(symbol="line-ew", size=18),
-                name="Lying"
+                name="Lying",
+                hoverinfo="skip"
             )
         )
 
-    # Vents
-    supply_x = [v["x"] for v in vents if v["type"] == "supply"]
-    supply_y = [v["y"] for v in vents if v["type"] == "supply"]
-    exhaust_x = [v["x"] for v in vents if v["type"] == "exhaust"]
-    exhaust_y = [v["y"] for v in vents if v["type"] == "exhaust"]
+    # Vents: each point gets customdata with index
+    supply_x = []
+    supply_y = []
+    supply_custom = []
+
+    exhaust_x = []
+    exhaust_y = []
+    exhaust_custom = []
+
+    supply_count = 0
+    exhaust_count = 0
+
+    for idx, v in enumerate(vents):
+        if v["type"] == "supply":
+            supply_count += 1
+            supply_x.append(v["x"])
+            supply_y.append(v["y"])
+            supply_custom.append(["vent", idx])
+        else:
+            exhaust_count += 1
+            exhaust_x.append(v["x"])
+            exhaust_y.append(v["y"])
+            exhaust_custom.append(["vent", idx])
 
     if supply_x:
         fig.add_trace(
             go.Scatter(
                 x=supply_x, y=supply_y,
                 mode="markers+text",
-                text=[f"S{i+1}" for i, v in enumerate([v for v in vents if v["type"] == "supply"])],
+                text=[f"S{i+1}" for i in range(supply_count)],
                 textposition="top center",
-                marker=dict(symbol="triangle-up", size=14),
-                name="Supply"
+                marker=dict(symbol="triangle-up", size=15),
+                customdata=supply_custom,
+                name="Supply",
+                hovertemplate="Supply vent<extra></extra>"
             )
         )
 
@@ -299,10 +300,12 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
             go.Scatter(
                 x=exhaust_x, y=exhaust_y,
                 mode="markers+text",
-                text=[f"E{i+1}" for i, v in enumerate([v for v in vents if v["type"] == "exhaust"])],
+                text=[f"E{i+1}" for i in range(exhaust_count)],
                 textposition="top center",
-                marker=dict(symbol="triangle-down", size=14),
-                name="Exhaust"
+                marker=dict(symbol="triangle-down", size=15),
+                customdata=exhaust_custom,
+                name="Exhaust",
+                hovertemplate="Exhaust vent<extra></extra>"
             )
         )
 
@@ -313,13 +316,14 @@ def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
         height=700,
         margin=dict(l=20, r=20, t=60, b=20),
         dragmode="select",
+        clickmode="event+select",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     )
 
     return fig
 
 
-def get_selected_point(event):
+def get_selected_payload(event):
     if not event:
         return None
 
@@ -332,30 +336,46 @@ def get_selected_point(event):
         return None
 
     p = points[0]
-    customdata = p.get("customdata")
-    if not customdata or len(customdata) < 2:
+    custom = p.get("customdata")
+    if not custom:
         return None
 
-    return float(customdata[0]), float(customdata[1])
+    return custom
 
 
-def maybe_add_vent(selected_xy, vent_type, vent_flow):
-    if selected_xy is None:
-        return
+def handle_selection(payload, edit_mode, vent_type, vent_flow):
+    if payload is None:
+        return False
 
-    x, y = selected_xy
-    new_key = (round(x, 3), round(y, 3), vent_type, int(vent_flow))
+    payload_key = tuple(payload)
+    if st.session_state.last_selection_key == payload_key:
+        return False
 
-    if st.session_state.last_added_key == new_key:
-        return
+    st.session_state.last_selection_key = payload_key
 
-    st.session_state.last_added_key = new_key
-    st.session_state.vents.append({
-        "type": vent_type,
-        "x": round(x, 2),
-        "y": round(y, 2),
-        "flow": int(vent_flow)
-    })
+    kind = payload[0]
+
+    # Add mode: click grid point
+    if edit_mode == "Add vent" and kind == "grid":
+        x = float(payload[1])
+        y = float(payload[2])
+
+        st.session_state.vents.append({
+            "type": vent_type,
+            "x": round(x, 2),
+            "y": round(y, 2),
+            "flow": int(vent_flow)
+        })
+        return True
+
+    # Delete mode: click existing vent
+    if edit_mode == "Delete vent" and kind == "vent":
+        vent_idx = int(payload[1])
+        if 0 <= vent_idx < len(st.session_state.vents):
+            st.session_state.vents.pop(vent_idx)
+            return True
+
+    return False
 
 
 # =========================================================
@@ -364,8 +384,8 @@ def maybe_add_vent(selected_xy, vent_type, vent_flow):
 if "vents" not in st.session_state:
     st.session_state.vents = []
 
-if "last_added_key" not in st.session_state:
-    st.session_state.last_added_key = None
+if "last_selection_key" not in st.session_state:
+    st.session_state.last_selection_key = None
 
 
 # =========================================================
@@ -402,7 +422,10 @@ with left:
     lying_n = st.slider("Lying people", 0, 40, 1)
     lying_state = st.selectbox("Lying activity", ["Stable", "Crowded / Uneasy", "Moving"])
 
-    st.markdown("### Click-to-add vent")
+    st.markdown("### Edit mode")
+    edit_mode = st.radio("Mode", ["Add vent", "Delete vent"], horizontal=True)
+
+    st.markdown("### New vent settings")
     pending_vent_type = st.radio("New vent type", ["supply", "exhaust"], horizontal=True)
     pending_vent_flow = st.slider("New vent flow (m³/h)", 50, 3000, 400, 50)
 
@@ -411,11 +434,13 @@ with left:
         if st.button("Undo last vent", use_container_width=True):
             if st.session_state.vents:
                 st.session_state.vents.pop()
-                st.session_state.last_added_key = None
+                st.session_state.last_selection_key = None
+                st.rerun()
     with c2:
         if st.button("Clear vents", use_container_width=True):
             st.session_state.vents = []
-            st.session_state.last_added_key = None
+            st.session_state.last_selection_key = None
+            st.rerun()
 
     st.markdown("### Current vents")
     if st.session_state.vents:
@@ -424,7 +449,7 @@ with left:
                 f"{i}. {v['type']} | x={v['x']:.2f} m | y={v['y']:.2f} m | flow={v['flow']} m³/h"
             )
     else:
-        st.caption("No vents yet. Click a point in the layout on the right.")
+        st.caption("No vents yet.")
 
 people = auto_generate_people(
     room_w, room_d,
@@ -472,9 +497,18 @@ with right:
         config={"scrollZoom": False}
     )
 
-    selected_xy = get_selected_point(event)
-    maybe_add_vent(selected_xy, pending_vent_type, pending_vent_flow)
+    payload = get_selected_payload(event)
+    changed = handle_selection(
+        payload=payload,
+        edit_mode=edit_mode,
+        vent_type=pending_vent_type,
+        vent_flow=pending_vent_flow
+    )
 
+    if changed:
+        st.rerun()
+
+    st.caption("Add vent 모드: 희미한 grid 점 클릭")
+    st.caption("Delete vent 모드: 기존 삼각형 환기구 클릭")
     st.caption("Standing=o, Sitting=square, Lying=line")
     st.caption("Supply=triangle up, Exhaust=triangle down")
-    st.caption("Heatmap cell or grid point를 직접 클릭하면 환기설비가 추가됨")
