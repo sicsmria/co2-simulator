@@ -5,13 +5,15 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="CO2 Room Simulator Lite", layout="wide")
+st.set_page_config(page_title="CO2 Room Simulator", layout="wide")
 
 # =========================================================
 # Constants
 # =========================================================
 OUTDOOR_CO2_PPM = 420.0
-MAX_HEATMAP_CELLS = 20000
+
+# Heatmap density control
+MAX_HEATMAP_CELLS = 15000
 
 CO2_GEN_M3_PER_H = {
     "standing": 0.021,
@@ -43,15 +45,20 @@ EQUIPMENT_TYPES = {
 if "equipment_map" not in st.session_state:
     st.session_state.equipment_map = {}
 
-
 # =========================================================
 # Helpers
 # =========================================================
 def get_adaptive_grid_step(room_w: float, room_d: float, target_max_cells: int = MAX_HEATMAP_CELLS) -> float:
+    """
+    큰 공간일수록 heatmap 격자를 거칠게 해서 로딩을 줄임.
+    """
     room_area = max(room_w * room_d, 1e-9)
     raw_step = math.sqrt(room_area / target_max_cells)
+
+    # 너무 작은 값 방지
     step = max(2.0, raw_step)
 
+    # 보기 좋은 구간으로 스냅
     candidate_steps = [2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
     for s in candidate_steps:
         if s >= step:
@@ -137,6 +144,11 @@ def compute_equipment_field(
     equipments_key: tuple,
     grid_step_m: float,
 ):
+    """
+    속도 우선 모델:
+    - 사람은 총량으로만 baseline CO2에 반영
+    - 설비만 공간 분포에 로컬 영향 반영
+    """
     X, Y = make_grid(room_w, room_d, grid_step_m)
     volume_m3, q_vent_m3ph, baseline_ppm = compute_baseline_ppm(
         room_w, room_d, room_h, ach, n_standing, n_sitting, n_lying
@@ -205,7 +217,7 @@ def make_heatmap_figure(room_w, room_d, X, Y, Z, equipments):
         height=540,
         autosize=False,
         margin=dict(l=20, r=20, t=45, b=20),
-        title="CO2 Heatmap (Lite Mode)",
+        title="CO2 Heatmap (Adaptive Lite Mode)",
     )
     fig.update_xaxes(
         title="Width (m)",
@@ -240,6 +252,18 @@ def trim_equipment_map(room_w: float, room_d: float, cell_size_m: float) -> None
     }
 
 
+def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
+    area = room_w * room_d
+    if area > 2_000_000:
+        return max(current, 100.0)
+    if area > 500_000:
+        return max(current, 50.0)
+    if area > 100_000:
+        return max(current, 20.0)
+    if area > 20_000:
+        return max(current, 10.0)
+    return current
+
 # =========================================================
 # Sidebar
 # =========================================================
@@ -255,8 +279,17 @@ n_sitting = st.sidebar.number_input("Sitting people", min_value=0, max_value=300
 n_lying = st.sidebar.number_input("Lying people", min_value=0, max_value=3000, value=10, step=1)
 
 st.sidebar.header("Equipment Editor")
-selected_tool = st.sidebar.radio("Equipment Tool", ["Supply", "Exhaust", "Purifier", "Eraser"], index=0)
-editor_step = st.sidebar.select_slider("Cell Size (m)", options=[5.0, 10.0, 20.0, 50.0, 100.0], value=20.0)
+selected_tool = st.sidebar.radio(
+    "Equipment Tool",
+    ["Supply", "Exhaust", "Purifier", "Eraser"],
+    index=0
+)
+
+editor_step = st.sidebar.select_slider(
+    "Cell Size (m)",
+    options=[5.0, 10.0, 20.0, 50.0, 100.0],
+    value=20.0
+)
 
 if st.sidebar.button("Clear Equipments"):
     st.session_state.equipment_map = {}
@@ -272,32 +305,41 @@ equipments_key = tuple((e["type"], e["x"], e["y"], e["w"], e["d"]) for e in equi
 grid_step_m = get_adaptive_grid_step(room_w, room_d)
 
 X, Y, Z, volume_m3, q_vent_m3ph, baseline_ppm = compute_equipment_field(
-    room_w, room_d, room_h, ach,
-    int(n_standing), int(n_sitting), int(n_lying),
+    room_w,
+    room_d,
+    room_h,
+    ach,
+    int(n_standing),
+    int(n_sitting),
+    int(n_lying),
     equipments_key,
     grid_step_m
 )
 
 fig = make_heatmap_figure(room_w, room_d, X, Y, Z, equipments)
+recommended_cell = recommend_cell_size(room_w, room_d, editor_step)
 
 # =========================================================
 # Main UI
 # =========================================================
-st.title("CO2 Room Simulator Lite")
+st.title("CO2 Room Simulator")
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Width", f"{room_w:.1f} m")
 m2.metric("Depth", f"{room_d:.1f} m")
 m3.metric("Height", f"{room_h:.1f} m")
 m4.metric("Volume", f"{volume_m3:.1f} m³")
-m5.metric("Population", f"{int(n_standing+n_sitting+n_lying)}")
+m5.metric("Population", f"{int(n_standing + n_sitting + n_lying)}")
 
 s1, s2, s3 = st.columns(3)
 s1.metric("Ventilation Flow", f"{q_vent_m3ph:.1f} m³/h")
 s2.metric("Baseline CO2", f"{baseline_ppm:.0f} ppm")
 s3.metric("Grid Step", f"{grid_step_m:.1f} m")
 
-st.info("Lite mode: occupants are reflected in total CO2 generation only. Individual human placement is disabled for speed.")
+st.info("Occupants are reflected in total CO2 generation only. Heatmap resolution is automatically reduced in large spaces for speed.")
+
+if recommended_cell > editor_step:
+    st.warning(f"This room is large. Recommended Cell Size: {recommended_cell:.1f} m or larger.")
 
 st.plotly_chart(fig, use_container_width=False)
 
@@ -305,7 +347,7 @@ st.plotly_chart(fig, use_container_width=False)
 # Coordinate-based equipment editor
 # =========================================================
 st.subheader("Equipment Placement")
-st.caption("Use coordinates instead of button grids for large spaces.")
+st.caption("For large spaces, coordinate placement is much faster than clickable button grids.")
 
 nx = max(1, int(room_w // editor_step))
 ny = max(1, int(room_d // editor_step))
@@ -329,3 +371,15 @@ with st.expander("Placed Equipments"):
             )
     else:
         st.write("No equipments placed.")
+
+with st.expander("Model Notes"):
+    st.markdown(
+        """
+- All geometric inputs are in meters.
+- The heatmap gets slower when the grid becomes too dense.
+- To keep speed acceptable, large rooms use a coarser grid automatically.
+- Occupants affect baseline CO2 only.
+- Equipment creates local CO2 reduction fields.
+- This is a simplified comparative model, not CFD.
+"""
+    )
