@@ -7,32 +7,49 @@ import math
 st.set_page_config(page_title="CO2 Room Simulator", layout="wide")
 
 # =========================================================
-# Basic constants
+# Constants
 # =========================================================
-GRID_STEP = 25  # spatial resolution
+GRID_STEP = 25
+EDITOR_STEP = 100   # 설비 배치용 셀 크기
 OUTDOOR_CO2 = 420
-AIR_DENSITY_FACTOR = 1.0  # placeholder if you later want density correction
 
-# Human footprint sizes (same unit as room width/depth)
-# You can tune these if needed.
+# 사람 크기 축소
 HUMAN_TYPES = {
     "standing": {
-        "w": 45,
-        "d": 45,
+        "w": 25,
+        "d": 25,
         "label": "Standing",
-        "co2": 0.020,   # arbitrary per-step strength for heatmap source
+        "co2": 0.020,
     },
     "sitting": {
-        "w": 45,
-        "d": 60,
+        "w": 30,
+        "d": 35,
         "label": "Sitting",
         "co2": 0.018,
     },
     "lying": {
-        "w": 50,
-        "d": 180,
+        "w": 30,
+        "d": 90,
         "label": "Lying",
         "co2": 0.016,
+    },
+}
+
+EQUIPMENT_TYPES = {
+    "Supply": {
+        "color": "rgba(0,150,255,0.95)",
+        "symbol": "S",
+        "effect": -180,
+    },
+    "Exhaust": {
+        "color": "rgba(255,80,80,0.95)",
+        "symbol": "E",
+        "effect": -220,
+    },
+    "Purifier": {
+        "color": "rgba(0,180,120,0.95)",
+        "symbol": "P",
+        "effect": -130,
     },
 }
 
@@ -48,6 +65,9 @@ if "layout_seed" not in st.session_state:
 if "last_layout_signature" not in st.session_state:
     st.session_state.last_layout_signature = None
 
+if "equipment_map" not in st.session_state:
+    # {(ix, iy): "Supply"/"Exhaust"/"Purifier"}
+    st.session_state.equipment_map = {}
 
 # =========================================================
 # Helpers
@@ -78,14 +98,12 @@ def generate_random_people(room_w, room_d, n_standing, n_sitting, n_lying, seed=
         [("sitting", i) for i in range(n_sitting)] +
         [("lying", i) for i in range(n_lying)]
     )
-
     rng.shuffle(request)
 
     for kind, _ in request:
         spec = HUMAN_TYPES[kind]
         pw, pd = spec["w"], spec["d"]
 
-        # lying people can rotate
         orientations = [(pw, pd)]
         if kind == "lying":
             orientations.append((pd, pw))
@@ -116,8 +134,6 @@ def generate_random_people(room_w, room_d, n_standing, n_sitting, n_lying, seed=
                 break
 
         if not success:
-            # If space is too crowded, just skip the remaining person
-            # instead of crashing.
             pass
 
     return placed
@@ -141,37 +157,63 @@ def make_grid(room_w, room_d, step=GRID_STEP):
     return X, Y
 
 
-def compute_co2_field(room_w, room_d, room_h, ach, people, outdoor_co2=OUTDOOR_CO2):
-    """
-    Simple demonstrative field model:
-    - Base concentration from occupancy and ventilation
-    - Localized source bumps around people
-    """
+def equipment_list_from_map(equipment_map, room_w, room_d, cell_size):
+    equipments = []
+    nx = int(room_w // cell_size)
+    ny = int(room_d // cell_size)
+
+    for (ix, iy), eq_type in equipment_map.items():
+        if 0 <= ix < nx and 0 <= iy < ny:
+            x0 = ix * cell_size
+            y0 = iy * cell_size
+            equipments.append({
+                "ix": ix,
+                "iy": iy,
+                "x": x0,
+                "y": y0,
+                "w": cell_size,
+                "d": cell_size,
+                "type": eq_type,
+                "effect": EQUIPMENT_TYPES[eq_type]["effect"],
+                "symbol": EQUIPMENT_TYPES[eq_type]["symbol"],
+                "color": EQUIPMENT_TYPES[eq_type]["color"],
+            })
+    return equipments
+
+
+def compute_co2_field(room_w, room_d, room_h, ach, people, equipments, outdoor_co2=OUTDOOR_CO2):
     X, Y = make_grid(room_w, room_d, GRID_STEP)
 
-    volume = max(room_w * room_d * room_h, 1.0)
-
-    total_source = sum(p["co2"] for p in people)
     n_people = len(people)
-
-    # Global baseline rise
-    # You can replace this with your own research formula later.
     baseline_rise = (n_people * 45) / max(ach, 0.2)
-
     Z = np.ones_like(X, dtype=float) * (outdoor_co2 + baseline_rise)
 
-    # Add local contributions around each person
+    # 사람 영향
     for p in people:
         cx = p["x"] + p["w"] / 2
         cy = p["y"] + p["d"] / 2
 
-        sigma = max((p["w"] + p["d"]) / 2.2, 40)
+        sigma = max((p["w"] + p["d"]) / 2.2, 25)
         dist2 = (X - cx) ** 2 + (Y - cy) ** 2
 
         local_strength = 350 * p["co2"] / max(ach, 0.3)
         Z += local_strength * np.exp(-dist2 / (2 * sigma ** 2))
 
-    # Mild clipping for readable heatmap
+    # 설비 영향 (아주 러프)
+    for eq in equipments:
+        cx = eq["x"] + eq["w"] / 2
+        cy = eq["y"] + eq["d"] / 2
+
+        if eq["type"] == "Supply":
+            sigma = eq["w"] * 1.4
+        elif eq["type"] == "Exhaust":
+            sigma = eq["w"] * 1.6
+        else:  # Purifier
+            sigma = eq["w"] * 1.2
+
+        dist2 = (X - cx) ** 2 + (Y - cy) ** 2
+        Z += eq["effect"] * np.exp(-dist2 / (2 * sigma ** 2))
+
     Z = np.clip(Z, outdoor_co2, 5000)
     return X, Y, Z
 
@@ -200,6 +242,31 @@ def add_people_shapes(fig, people):
                 y=[p["y"] + p["d"] / 2],
                 mode="text",
                 text=[p["label"][0]],
+                textfont=dict(color="white", size=10),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+
+def add_equipment_shapes(fig, equipments):
+    for eq in equipments:
+        fig.add_shape(
+            type="rect",
+            x0=eq["x"] + eq["w"] * 0.15,
+            y0=eq["y"] + eq["d"] * 0.15,
+            x1=eq["x"] + eq["w"] * 0.85,
+            y1=eq["y"] + eq["d"] * 0.85,
+            line=dict(color="black", width=1),
+            fillcolor=eq["color"],
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[eq["x"] + eq["w"] / 2],
+                y=[eq["y"] + eq["d"] / 2],
+                mode="text",
+                text=[eq["symbol"]],
                 textfont=dict(color="white", size=12),
                 showlegend=False,
                 hoverinfo="skip",
@@ -207,7 +274,25 @@ def add_people_shapes(fig, people):
         )
 
 
-def make_heatmap_figure(room_w, room_d, X, Y, Z, people):
+def add_editor_grid(fig, room_w, room_d, cell_size):
+    for x in np.arange(0, room_w + 0.1, cell_size):
+        fig.add_shape(
+            type="line",
+            x0=x, y0=0,
+            x1=x, y1=room_d,
+            line=dict(color="rgba(255,255,255,0.15)", width=1)
+        )
+
+    for y in np.arange(0, room_d + 0.1, cell_size):
+        fig.add_shape(
+            type="line",
+            x0=0, y0=y,
+            x1=room_w, y1=y,
+            line=dict(color="rgba(255,255,255,0.15)", width=1)
+        )
+
+
+def make_heatmap_figure(room_w, room_d, X, Y, Z, people, equipments, cell_size):
     fig = go.Figure()
 
     fig.add_trace(
@@ -223,9 +308,10 @@ def make_heatmap_figure(room_w, room_d, X, Y, Z, people):
         )
     )
 
+    add_editor_grid(fig, room_w, room_d, cell_size)
     add_people_shapes(fig, people)
+    add_equipment_shapes(fig, equipments)
 
-    # Fixed size: this is the important part
     fig.update_layout(
         width=950,
         height=520,
@@ -246,15 +332,22 @@ def make_heatmap_figure(room_w, room_d, X, Y, Z, people):
         range=[0, room_d],
         autorange="reversed",
     )
-
     return fig
+
+
+def toggle_equipment(ix, iy, selected_tool):
+    key = (ix, iy)
+    if selected_tool == "Eraser":
+        if key in st.session_state.equipment_map:
+            del st.session_state.equipment_map[key]
+    else:
+        st.session_state.equipment_map[key] = selected_tool
 
 
 # =========================================================
 # Sidebar controls
 # =========================================================
 st.sidebar.header("Room Settings")
-
 room_w = st.sidebar.slider("Room Width", min_value=100, max_value=3000, value=1000, step=50)
 room_d = st.sidebar.slider("Room Depth", min_value=100, max_value=1000, value=500, step=25)
 room_h = st.sidebar.slider("Room Height", min_value=200, max_value=1000, value=300, step=10)
@@ -266,48 +359,108 @@ n_standing = st.sidebar.number_input("Standing people", min_value=0, max_value=2
 n_sitting = st.sidebar.number_input("Sitting people", min_value=0, max_value=200, value=3, step=1)
 n_lying = st.sidebar.number_input("Lying people", min_value=0, max_value=200, value=1, step=1)
 
-col_btn1, col_btn2 = st.sidebar.columns(2)
+st.sidebar.header("Equipment Editor")
+selected_tool = st.sidebar.radio(
+    "Equipment Tool",
+    ["Supply", "Exhaust", "Purifier", "Eraser"],
+    index=0
+)
 
+editor_step = st.sidebar.select_slider(
+    "Cell Size",
+    options=[50, 100, 150, 200],
+    value=100
+)
+
+col_btn1, col_btn2 = st.sidebar.columns(2)
 with col_btn1:
     if st.button("Randomize Population"):
         st.session_state.layout_seed += 1
 
 with col_btn2:
-    if st.button("Clear Population"):
-        st.session_state.people_layout = []
-        st.session_state.last_layout_signature = ("cleared",)
+    if st.button("Clear Equipments"):
+        st.session_state.equipment_map = {}
 
-# Automatically regenerate when room size / counts / seed changes
+# 방 크기 줄었을 때 범위 밖 설비 삭제
+max_ix = int(room_w // editor_step)
+max_iy = int(room_d // editor_step)
+st.session_state.equipment_map = {
+    (ix, iy): eq
+    for (ix, iy), eq in st.session_state.equipment_map.items()
+    if ix < max_ix and iy < max_iy
+}
+
 ensure_people_layout(room_w, room_d, n_standing, n_sitting, n_lying)
 people = st.session_state.people_layout
+equipments = equipment_list_from_map(st.session_state.equipment_map, room_w, room_d, editor_step)
 
 # =========================================================
-# Main view
+# Main
 # =========================================================
 st.title("CO2 Room Simulator")
 
-info1, info2, info3, info4 = st.columns(4)
-info1.metric("Width", f"{room_w}")
-info2.metric("Depth", f"{room_d}")
-info3.metric("Height", f"{room_h}")
-info4.metric("Placed Population", f"{len(people)}")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Width", f"{room_w}")
+m2.metric("Depth", f"{room_d}")
+m3.metric("Height", f"{room_h}")
+m4.metric("Population", f"{len(people)}")
 
 if len(people) < (n_standing + n_sitting + n_lying):
-    st.warning("Some people could not be placed because the room is too crowded for non-overlapping random placement.")
+    st.warning("Some people could not be placed because the room is too crowded.")
 
-X, Y, Z = compute_co2_field(room_w, room_d, room_h, ach, people)
+X, Y, Z = compute_co2_field(room_w, room_d, room_h, ach, people, equipments)
+fig = make_heatmap_figure(room_w, room_d, X, Y, Z, people, equipments, editor_step)
 
-fig = make_heatmap_figure(room_w, room_d, X, Y, Z, people)
-
-# Fixed size on screen
 st.plotly_chart(fig, use_container_width=False)
+
+st.subheader("Equipment Cell Editor")
+st.caption("Select a tool in the sidebar, then click a cell below.")
+
+nx = max(1, int(room_w // editor_step))
+ny = max(1, int(room_d // editor_step))
+
+legend_cols = st.columns(4)
+legend_cols[0].markdown("**S** = Supply")
+legend_cols[1].markdown("**E** = Exhaust")
+legend_cols[2].markdown("**P** = Purifier")
+legend_cols[3].markdown("**·** = Empty")
+
+# 너무 많으면 약간 경고
+if nx > 35:
+    st.info("The room is wide, so the editor may feel a bit heavy. Increase Cell Size if it becomes slow.")
+
+# 위에서 아래로 보기 좋게 y행 순서대로 표시
+for iy in range(ny):
+    cols = st.columns(nx + 1)
+    cols[0].markdown(f"**{iy}**")
+    for ix in range(nx):
+        key = (ix, iy)
+        current = st.session_state.equipment_map.get(key)
+
+        if current is None:
+            label = "·"
+        else:
+            label = EQUIPMENT_TYPES[current]["symbol"]
+
+        if cols[ix + 1].button(label, key=f"cell_{ix}_{iy}_{editor_step}_{room_w}_{room_d}"):
+            toggle_equipment(ix, iy, selected_tool)
+            st.rerun()
 
 with st.expander("Placed People Details"):
     if people:
         for i, p in enumerate(people, 1):
             st.write(
-                f"{i}. {p['label']} | x={p['x']:.1f}, y={p['y']:.1f}, "
-                f"w={p['w']}, d={p['d']}"
+                f"{i}. {p['label']} | x={p['x']:.1f}, y={p['y']:.1f}, w={p['w']}, d={p['d']}"
             )
     else:
         st.write("No people placed.")
+
+with st.expander("Placed Equipments"):
+    if equipments:
+        for i, eq in enumerate(equipments, 1):
+            st.write(
+                f"{i}. {eq['type']} | cell=({eq['ix']}, {eq['iy']}) | "
+                f"x={eq['x']:.0f}, y={eq['y']:.0f}"
+            )
+    else:
+        st.write("No equipments placed.")
