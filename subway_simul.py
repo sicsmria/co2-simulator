@@ -9,7 +9,7 @@ st.set_page_config(layout="wide", page_title="CO2 Grid Simulation")
 # =========================================================
 def get_activity_co2_rate(activity_type: str) -> float:
     rates = {
-        "Stable": 0.018,             # m3/h/person
+        "Stable": 0.018,
         "Crowded / Uneasy": 0.024,
         "Moving": 0.032
     }
@@ -29,8 +29,8 @@ def pos_to_idx(x, y, cell_size, nx, ny):
 
 
 def idx_to_pos(ix, iy, cell_size):
-    x = (ix + 0.5) * cell_size
-    y = (iy + 0.5) * cell_size
+    x = min((ix + 0.5) * cell_size, 1e9)
+    y = min((iy + 0.5) * cell_size, 1e9)
     return x, y
 
 
@@ -62,7 +62,7 @@ def apply_people_source(C, people, cell_size, nx, ny, dt_h, room_h):
 
     for p in people:
         ix, iy = pos_to_idx(p["x"], p["y"], cell_size, nx, ny)
-        G = get_activity_co2_rate(p["activity"])  # m3/h
+        G = get_activity_co2_rate(p["activity"])
         delta_ppm = (G / cell_volume) * 1e6 * dt_h
         C[ix, iy] += delta_ppm
 
@@ -74,25 +74,19 @@ def apply_vents(C, vents, outdoor_co2, cell_size, nx, ny, dt_h, room_h):
 
     for v in vents:
         ix, iy = pos_to_idx(v["x"], v["y"], cell_size, nx, ny)
+        local_exchange = min((v["flow"] / cell_volume) * dt_h, 1.0)
 
-        local_exchange = (v["flow"] / cell_volume) * dt_h
-        local_exchange = min(local_exchange, 1.0)
+        C[ix, iy] = C[ix, iy] - local_exchange * (C[ix, iy] - outdoor_co2)
 
         if v["type"] == "supply":
-            C[ix, iy] = C[ix, iy] - local_exchange * (C[ix, iy] - outdoor_co2)
+            factor = 0.35
+        else:
+            factor = 0.45
 
-            for dx, dy, factor in [(-1, 0, 0.35), (1, 0, 0.35), (0, -1, 0.35), (0, 1, 0.35)]:
-                ni, nj = ix + dx, iy + dy
-                if 0 <= ni < nx and 0 <= nj < ny:
-                    C[ni, nj] = C[ni, nj] - local_exchange * factor * (C[ni, nj] - outdoor_co2)
-
-        elif v["type"] == "exhaust":
-            C[ix, iy] = C[ix, iy] - local_exchange * (C[ix, iy] - outdoor_co2)
-
-            for dx, dy, factor in [(-1, 0, 0.45), (1, 0, 0.45), (0, -1, 0.45), (0, 1, 0.45)]:
-                ni, nj = ix + dx, iy + dy
-                if 0 <= ni < nx and 0 <= nj < ny:
-                    C[ni, nj] = C[ni, nj] - local_exchange * factor * (C[ni, nj] - outdoor_co2)
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ni, nj = ix + dx, iy + dy
+            if 0 <= ni < nx and 0 <= nj < ny:
+                C[ni, nj] = C[ni, nj] - local_exchange * factor * (C[ni, nj] - outdoor_co2)
 
     return C
 
@@ -134,12 +128,7 @@ def auto_generate_people(
         col = i % standing_cols
         x = min(0.8 + col * 1.0, room_w - 0.6)
         y = min(1.2 + row * 1.0, max(1.2, room_d * 0.25))
-        people.append({
-            "type": "standing",
-            "x": x,
-            "y": y,
-            "activity": standing_state
-        })
+        people.append({"type": "standing", "x": x, "y": y, "activity": standing_state})
 
     sitting_cols = max(1, int(max(1.0, room_w - 1.0) // 1.1))
     for i in range(sitting_n):
@@ -147,12 +136,7 @@ def auto_generate_people(
         col = i % sitting_cols
         x = min(0.8 + col * 1.1, room_w - 0.6)
         y = min(room_d * 0.50 + row * 1.0, room_d - 1.0)
-        people.append({
-            "type": "sitting",
-            "x": x,
-            "y": y,
-            "activity": sitting_state
-        })
+        people.append({"type": "sitting", "x": x, "y": y, "activity": sitting_state})
 
     lying_cols = max(1, int(max(1.0, room_w - 1.0) // 1.3))
     for i in range(lying_n):
@@ -160,187 +144,199 @@ def auto_generate_people(
         col = i % lying_cols
         x = min(1.0 + col * 1.3, room_w - 0.8)
         y = min(room_d * 0.78 + row * 0.9, room_d - 0.8)
-        people.append({
-            "type": "lying",
-            "x": x,
-            "y": y,
-            "activity": lying_state
-        })
+        people.append({"type": "lying", "x": x, "y": y, "activity": lying_state})
 
     return people
 
 
-def build_layout_figure(room_w, room_d, cell_size, people, vents, C=None):
+# =========================================================
+# Plot builders
+# =========================================================
+def build_editor_figure(room_w, room_d, cell_size, people, vents):
     nx, ny = create_grid(room_w, room_d, cell_size)
-
     fig = go.Figure()
 
-    # Heatmap
-    if C is not None:
-        x_centers = [(i + 0.5) * cell_size for i in range(nx)]
-        y_centers = [(j + 0.5) * cell_size for j in range(ny)]
-
-        fig.add_trace(
-            go.Heatmap(
-                z=C.T,
-                x=x_centers,
-                y=y_centers,
-                colorscale="RdYlBu_r",
-                zmin=400,
-                zmax=3000,
-                colorbar=dict(title="CO2 (ppm)"),
-                hovertemplate="x=%{x:.2f} m<br>y=%{y:.2f} m<br>CO2=%{z:.0f} ppm<extra></extra>"
-            )
-        )
-
     # Clickable grid points
-    grid_x = []
-    grid_y = []
-    grid_custom = []
+    grid_x, grid_y, grid_custom = [], [], []
     for i in range(nx):
         for j in range(ny):
             x, y = idx_to_pos(i, j, cell_size)
-            grid_x.append(x)
-            grid_y.append(y)
-            grid_custom.append(["grid", round(x, 3), round(y, 3)])
+            if x <= room_w and y <= room_d:
+                grid_x.append(x)
+                grid_y.append(y)
+                grid_custom.append(["grid", round(x, 3), round(y, 3)])
 
     fig.add_trace(
         go.Scatter(
             x=grid_x,
             y=grid_y,
             mode="markers",
-            marker=dict(size=10, opacity=0.18, symbol="circle"),
+            marker=dict(size=11, opacity=0.35, symbol="circle"),
             customdata=grid_custom,
-            name="Grid click points",
-            hovertemplate="Add vent here<br>x=%{customdata[1]:.2f} m<br>y=%{customdata[2]:.2f} m<extra></extra>"
+            name="Grid",
+            hovertemplate="x=%{customdata[1]:.2f} m<br>y=%{customdata[2]:.2f} m<extra></extra>"
         )
     )
 
     # People
-    standing_x = [p["x"] for p in people if p["type"] == "standing"]
-    standing_y = [p["y"] for p in people if p["type"] == "standing"]
-    sitting_x = [p["x"] for p in people if p["type"] == "sitting"]
-    sitting_y = [p["y"] for p in people if p["type"] == "sitting"]
-    lying_x = [p["x"] for p in people if p["type"] == "lying"]
-    lying_y = [p["y"] for p in people if p["type"] == "lying"]
+    standing = [p for p in people if p["type"] == "standing"]
+    sitting = [p for p in people if p["type"] == "sitting"]
+    lying = [p for p in people if p["type"] == "lying"]
 
-    if standing_x:
-        fig.add_trace(
-            go.Scatter(
-                x=standing_x, y=standing_y,
-                mode="markers",
-                marker=dict(symbol="circle", size=10),
-                name="Standing",
-                hoverinfo="skip"
-            )
-        )
+    if standing:
+        fig.add_trace(go.Scatter(
+            x=[p["x"] for p in standing],
+            y=[p["y"] for p in standing],
+            mode="markers",
+            marker=dict(symbol="circle", size=10),
+            name="Standing",
+            hoverinfo="skip"
+        ))
+    if sitting:
+        fig.add_trace(go.Scatter(
+            x=[p["x"] for p in sitting],
+            y=[p["y"] for p in sitting],
+            mode="markers",
+            marker=dict(symbol="square", size=10),
+            name="Sitting",
+            hoverinfo="skip"
+        ))
+    if lying:
+        fig.add_trace(go.Scatter(
+            x=[p["x"] for p in lying],
+            y=[p["y"] for p in lying],
+            mode="markers",
+            marker=dict(symbol="line-ew", size=18),
+            name="Lying",
+            hoverinfo="skip"
+        ))
 
-    if sitting_x:
-        fig.add_trace(
-            go.Scatter(
-                x=sitting_x, y=sitting_y,
-                mode="markers",
-                marker=dict(symbol="square", size=10),
-                name="Sitting",
-                hoverinfo="skip"
-            )
-        )
+    # Vents
+    supply_pts = [(idx, v) for idx, v in enumerate(vents) if v["type"] == "supply"]
+    exhaust_pts = [(idx, v) for idx, v in enumerate(vents) if v["type"] == "exhaust"]
 
-    if lying_x:
-        fig.add_trace(
-            go.Scatter(
-                x=lying_x, y=lying_y,
-                mode="markers",
-                marker=dict(symbol="line-ew", size=18),
-                name="Lying",
-                hoverinfo="skip"
-            )
-        )
+    if supply_pts:
+        fig.add_trace(go.Scatter(
+            x=[v["x"] for _, v in supply_pts],
+            y=[v["y"] for _, v in supply_pts],
+            mode="markers+text",
+            text=[f"S{i+1}" for i in range(len(supply_pts))],
+            textposition="top center",
+            marker=dict(symbol="triangle-up", size=16),
+            customdata=[["vent", idx] for idx, _ in supply_pts],
+            name="Supply",
+            hovertemplate="Supply vent<extra></extra>"
+        ))
 
-    # Vents: each point gets customdata with index
-    supply_x = []
-    supply_y = []
-    supply_custom = []
-
-    exhaust_x = []
-    exhaust_y = []
-    exhaust_custom = []
-
-    supply_count = 0
-    exhaust_count = 0
-
-    for idx, v in enumerate(vents):
-        if v["type"] == "supply":
-            supply_count += 1
-            supply_x.append(v["x"])
-            supply_y.append(v["y"])
-            supply_custom.append(["vent", idx])
-        else:
-            exhaust_count += 1
-            exhaust_x.append(v["x"])
-            exhaust_y.append(v["y"])
-            exhaust_custom.append(["vent", idx])
-
-    if supply_x:
-        fig.add_trace(
-            go.Scatter(
-                x=supply_x, y=supply_y,
-                mode="markers+text",
-                text=[f"S{i+1}" for i in range(supply_count)],
-                textposition="top center",
-                marker=dict(symbol="triangle-up", size=15),
-                customdata=supply_custom,
-                name="Supply",
-                hovertemplate="Supply vent<extra></extra>"
-            )
-        )
-
-    if exhaust_x:
-        fig.add_trace(
-            go.Scatter(
-                x=exhaust_x, y=exhaust_y,
-                mode="markers+text",
-                text=[f"E{i+1}" for i in range(exhaust_count)],
-                textposition="top center",
-                marker=dict(symbol="triangle-down", size=15),
-                customdata=exhaust_custom,
-                name="Exhaust",
-                hovertemplate="Exhaust vent<extra></extra>"
-            )
-        )
+    if exhaust_pts:
+        fig.add_trace(go.Scatter(
+            x=[v["x"] for _, v in exhaust_pts],
+            y=[v["y"] for _, v in exhaust_pts],
+            mode="markers+text",
+            text=[f"E{i+1}" for i in range(len(exhaust_pts))],
+            textposition="top center",
+            marker=dict(symbol="triangle-down", size=16),
+            customdata=[["vent", idx] for idx, _ in exhaust_pts],
+            name="Exhaust",
+            hovertemplate="Exhaust vent<extra></extra>"
+        ))
 
     fig.update_layout(
-        title="Layout editor / CO2 map",
-        xaxis=dict(title="Width (m)", range=[0, room_w], constrain="domain"),
+        title="Layout editor",
+        xaxis=dict(title="Width (m)", range=[0, room_w]),
         yaxis=dict(title="Depth (m)", range=[0, room_d], scaleanchor="x", scaleratio=1),
-        height=700,
-        margin=dict(l=20, r=20, t=60, b=20),
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
         dragmode="select",
         clickmode="event+select",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     )
-
     return fig
 
 
-def get_selected_payload(event):
-    if not event:
-        return None
+def build_heatmap_figure(room_w, room_d, cell_size, people, vents, C):
+    nx, ny = create_grid(room_w, room_d, cell_size)
+    x_centers = [(i + 0.5) * cell_size for i in range(nx)]
+    y_centers = [(j + 0.5) * cell_size for j in range(ny)]
 
-    selection = event.get("selection")
-    if not selection:
-        return None
+    fig = go.Figure()
 
-    points = selection.get("points", [])
-    if not points:
-        return None
+    fig.add_trace(
+        go.Heatmap(
+            z=C.T,
+            x=x_centers,
+            y=y_centers,
+            colorscale="RdYlBu_r",
+            zmin=400,
+            zmax=3000,
+            colorbar=dict(title="CO2 (ppm)"),
+            hovertemplate="x=%{x:.2f} m<br>y=%{y:.2f} m<br>CO2=%{z:.0f} ppm<extra></extra>"
+        )
+    )
 
-    p = points[0]
-    custom = p.get("customdata")
-    if not custom:
-        return None
+    if vents:
+        fig.add_trace(go.Scatter(
+            x=[v["x"] for v in vents if v["type"] == "supply"],
+            y=[v["y"] for v in vents if v["type"] == "supply"],
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=13),
+            name="Supply"
+        ))
+        fig.add_trace(go.Scatter(
+            x=[v["x"] for v in vents if v["type"] == "exhaust"],
+            y=[v["y"] for v in vents if v["type"] == "exhaust"],
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=13),
+            name="Exhaust"
+        ))
 
-    return custom
+    fig.update_layout(
+        title="CO2 heatmap",
+        xaxis=dict(title="Width (m)", range=[0, room_w]),
+        yaxis=dict(title="Depth (m)", range=[0, room_d], scaleanchor="x", scaleratio=1),
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+# =========================================================
+# Selection handling
+# =========================================================
+def extract_payload_from_event(event):
+    # event object path
+    try:
+        points = event.selection.points
+        if points:
+            custom = points[0].get("customdata")
+            if custom:
+                return list(custom)
+    except Exception:
+        pass
+
+    # dict-like path
+    try:
+        points = event["selection"]["points"]
+        if points:
+            custom = points[0].get("customdata")
+            if custom:
+                return list(custom)
+    except Exception:
+        pass
+
+    return None
+
+
+def extract_payload_from_session(key_name):
+    try:
+        state = st.session_state.get(key_name)
+        if state and "selection" in state and state["selection"]["points"]:
+            custom = state["selection"]["points"][0].get("customdata")
+            if custom:
+                return list(custom)
+    except Exception:
+        pass
+    return None
 
 
 def handle_selection(payload, edit_mode, vent_type, vent_flow):
@@ -355,11 +351,9 @@ def handle_selection(payload, edit_mode, vent_type, vent_flow):
 
     kind = payload[0]
 
-    # Add mode: click grid point
     if edit_mode == "Add vent" and kind == "grid":
         x = float(payload[1])
         y = float(payload[2])
-
         st.session_state.vents.append({
             "type": vent_type,
             "x": round(x, 2),
@@ -368,7 +362,6 @@ def handle_selection(payload, edit_mode, vent_type, vent_flow):
         })
         return True
 
-    # Delete mode: click existing vent
     if edit_mode == "Delete vent" and kind == "vent":
         vent_idx = int(payload[1])
         if 0 <= vent_idx < len(st.session_state.vents):
@@ -383,13 +376,12 @@ def handle_selection(payload, edit_mode, vent_type, vent_flow):
 # =========================================================
 if "vents" not in st.session_state:
     st.session_state.vents = []
-
 if "last_selection_key" not in st.session_state:
     st.session_state.last_selection_key = None
 
 
 # =========================================================
-# Layout
+# UI
 # =========================================================
 st.title("Indoor CO2 Grid Simulation")
 
@@ -429,14 +421,14 @@ with left:
     pending_vent_type = st.radio("New vent type", ["supply", "exhaust"], horizontal=True)
     pending_vent_flow = st.slider("New vent flow (m³/h)", 50, 3000, 400, 50)
 
-    c1, c2 = st.columns(2)
-    with c1:
+    a, b = st.columns(2)
+    with a:
         if st.button("Undo last vent", use_container_width=True):
             if st.session_state.vents:
                 st.session_state.vents.pop()
                 st.session_state.last_selection_key = None
                 st.rerun()
-    with c2:
+    with b:
         if st.button("Clear vents", use_container_width=True):
             st.session_state.vents = []
             st.session_state.last_selection_key = None
@@ -445,9 +437,7 @@ with left:
     st.markdown("### Current vents")
     if st.session_state.vents:
         for i, v in enumerate(st.session_state.vents, start=1):
-            st.caption(
-                f"{i}. {v['type']} | x={v['x']:.2f} m | y={v['y']:.2f} m | flow={v['flow']} m³/h"
-            )
+            st.caption(f"{i}. {v['type']} | x={v['x']:.2f} m | y={v['y']:.2f} m | flow={v['flow']} m³/h")
     else:
         st.caption("No vents yet.")
 
@@ -480,24 +470,21 @@ with right:
     m2.metric("Max CO2", f"{max_co2:.0f} ppm")
     m3.metric("Area >1000 ppm", f"{risk_ratio:.1f}%")
 
-    fig = build_layout_figure(
-        room_w=room_w,
-        room_d=room_d,
-        cell_size=cell_size,
-        people=people,
-        vents=st.session_state.vents,
-        C=C
-    )
+    editor_fig = build_editor_figure(room_w, room_d, cell_size, people, st.session_state.vents)
 
     event = st.plotly_chart(
-        fig,
-        use_container_width=True,
-        key="layout_plot",
+        editor_fig,
+        key="layout_editor",
         on_select="rerun",
+        selection_mode="points",
+        use_container_width=True,
         config={"scrollZoom": False}
     )
 
-    payload = get_selected_payload(event)
+    payload = extract_payload_from_event(event)
+    if payload is None:
+        payload = extract_payload_from_session("layout_editor")
+
     changed = handle_selection(
         payload=payload,
         edit_mode=edit_mode,
@@ -508,7 +495,10 @@ with right:
     if changed:
         st.rerun()
 
-    st.caption("Add vent 모드: 희미한 grid 점 클릭")
-    st.caption("Delete vent 모드: 기존 삼각형 환기구 클릭")
-    st.caption("Standing=o, Sitting=square, Lying=line")
-    st.caption("Supply=triangle up, Exhaust=triangle down")
+    heatmap_fig = build_heatmap_figure(
+        room_w, room_d, cell_size, people, st.session_state.vents, C
+    )
+    st.plotly_chart(heatmap_fig, use_container_width=True, config={"scrollZoom": False})
+
+    st.caption("Add vent: 위쪽 Layout editor의 grid 점 클릭")
+    st.caption("Delete vent: 위쪽 Layout editor의 삼각형 환기구 클릭")
