@@ -1,3 +1,5 @@
 streamlit>=1.35
-plotly>=5
 numpy
+matplotlib
+pillow
+streamlit-image-coordinates==0.4.0
