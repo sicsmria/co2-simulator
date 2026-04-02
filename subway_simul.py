@@ -7,12 +7,13 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 st.set_page_config(layout="wide", page_title="CO2 Grid Simulation")
 
+
 # =========================================================
-# Helpers
+# Basic helpers
 # =========================================================
 def get_activity_co2_rate(activity_type: str) -> float:
     rates = {
-        "Stable": 0.018,
+        "Stable": 0.018,             # m3/h/person
         "Crowded / Uneasy": 0.024,
         "Moving": 0.032
     }
@@ -31,6 +32,47 @@ def pos_to_idx(x, y, cell_size, nx, ny):
     return ix, iy
 
 
+def idx_to_center(ix, iy, cell_size, room_w, room_d):
+    x = min((ix + 0.5) * cell_size, room_w)
+    y = min((iy + 0.5) * cell_size, room_d)
+    return round(x, 2), round(y, 2)
+
+
+def snap_to_cell_center(x, y, cell_size, room_w, room_d):
+    ix = int(x / cell_size)
+    iy = int(y / cell_size)
+
+    max_ix = max(0, int(np.ceil(room_w / cell_size)) - 1)
+    max_iy = max(0, int(np.ceil(room_d / cell_size)) - 1)
+
+    ix = min(max(ix, 0), max_ix)
+    iy = min(max(iy, 0), max_iy)
+
+    x_snap, y_snap = idx_to_center(ix, iy, cell_size, room_w, room_d)
+    return x_snap, y_snap, ix, iy
+
+
+def nearest_vent_index(x, y, vents):
+    if not vents:
+        return None
+
+    best_idx = None
+    best_dist = None
+    for idx, v in enumerate(vents):
+        d = (v["x"] - x) ** 2 + (v["y"] - y) ** 2
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best_idx = idx
+    return best_idx
+
+
+def vent_exists_at(x, y, vents, tol=1e-9):
+    return any(abs(v["x"] - x) < tol and abs(v["y"] - y) < tol for v in vents)
+
+
+# =========================================================
+# Physics / simulation
+# =========================================================
 def diffuse(C, diffusion_strength=0.15):
     C_new = C.copy()
     nx, ny = C.shape
@@ -59,7 +101,7 @@ def apply_people_source(C, people, cell_size, nx, ny, dt_h, room_h):
 
     for p in people:
         ix, iy = pos_to_idx(p["x"], p["y"], cell_size, nx, ny)
-        G = get_activity_co2_rate(p["activity"])
+        G = get_activity_co2_rate(p["activity"])  # m3/h
         delta_ppm = (G / cell_volume) * 1e6 * dt_h
         C[ix, iy] += delta_ppm
 
@@ -108,6 +150,9 @@ def simulate_grid(
     return C
 
 
+# =========================================================
+# Automatic people placement
+# =========================================================
 def auto_generate_people(
     room_w, room_d,
     standing_n, sitting_n, lying_n,
@@ -121,7 +166,12 @@ def auto_generate_people(
         col = i % standing_cols
         x = min(0.8 + col * 1.0, room_w - 0.6)
         y = min(1.2 + row * 1.0, max(1.2, room_d * 0.25))
-        people.append({"type": "standing", "x": x, "y": y, "activity": standing_state})
+        people.append({
+            "type": "standing",
+            "x": x,
+            "y": y,
+            "activity": standing_state
+        })
 
     sitting_cols = max(1, int(max(1.0, room_w - 1.0) // 1.1))
     for i in range(sitting_n):
@@ -129,7 +179,12 @@ def auto_generate_people(
         col = i % sitting_cols
         x = min(0.8 + col * 1.1, room_w - 0.6)
         y = min(room_d * 0.50 + row * 1.0, room_d - 1.0)
-        people.append({"type": "sitting", "x": x, "y": y, "activity": sitting_state})
+        people.append({
+            "type": "sitting",
+            "x": x,
+            "y": y,
+            "activity": sitting_state
+        })
 
     lying_cols = max(1, int(max(1.0, room_w - 1.0) // 1.3))
     for i in range(lying_n):
@@ -137,58 +192,19 @@ def auto_generate_people(
         col = i % lying_cols
         x = min(1.0 + col * 1.3, room_w - 0.8)
         y = min(room_d * 0.78 + row * 0.9, room_d - 0.8)
-        people.append({"type": "lying", "x": x, "y": y, "activity": lying_state})
+        people.append({
+            "type": "lying",
+            "x": x,
+            "y": y,
+            "activity": lying_state
+        })
 
     return people
 
 
 # =========================================================
-# Image coordinate helpers
+# Coordinate conversion for clicked image
 # =========================================================
-def render_layout_image(room_w, room_d, people, vents):
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
-
-    ax.set_xlim(0, room_w)
-    ax.set_ylim(0, room_d)
-    ax.set_aspect("equal")
-    ax.set_title("Layout editor")
-    ax.set_xlabel("Width (m)")
-    ax.set_ylabel("Depth (m)")
-    ax.grid(True, alpha=0.25)
-
-    # room boundary
-    ax.plot([0, room_w, room_w, 0, 0], [0, 0, room_d, room_d, 0], linewidth=2)
-
-    # people
-    for p in people:
-        if p["type"] == "standing":
-            ax.scatter(p["x"], p["y"], marker="o", s=70)
-        elif p["type"] == "sitting":
-            ax.scatter(p["x"], p["y"], marker="s", s=70)
-        else:
-            ax.scatter(p["x"], p["y"], marker="_", s=220)
-
-    # vents
-    supply_idx = 1
-    exhaust_idx = 1
-    for v in vents:
-        if v["type"] == "supply":
-            ax.scatter(v["x"], v["y"], marker="^", s=160)
-            ax.text(v["x"], v["y"] + 0.18, f"S{supply_idx}", ha="center")
-            supply_idx += 1
-        else:
-            ax.scatter(v["x"], v["y"], marker="v", s=160)
-            ax.text(v["x"], v["y"] + 0.18, f"E{exhaust_idx}", ha="center")
-            exhaust_idx += 1
-
-    buf = io.BytesIO()
-    plt.tight_layout()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return Image.open(buf)
-
-
 def pixel_to_room_coords(px, py, img_w, img_h, room_w, room_d):
     x = (px / img_w) * room_w
     y = room_d - (py / img_h) * room_d
@@ -197,20 +213,75 @@ def pixel_to_room_coords(px, py, img_w, img_h, room_w, room_d):
     return x, y
 
 
-def nearest_vent_index(x, y, vents):
-    if not vents:
-        return None
-    dists = [((v["x"] - x) ** 2 + (v["y"] - y) ** 2, idx) for idx, v in enumerate(vents)]
-    dists.sort(key=lambda t: t[0])
-    return dists[0][1]
+# =========================================================
+# Rendering
+# =========================================================
+def render_layout_image(room_w, room_d, cell_size, people, vents):
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
+
+    ax.set_xlim(0, room_w)
+    ax.set_ylim(0, room_d)
+    ax.set_aspect("equal")
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+
+    # Grid lines
+    x_lines = np.arange(0, room_w + cell_size, cell_size)
+    y_lines = np.arange(0, room_d + cell_size, cell_size)
+
+    for x in x_lines:
+        ax.plot([x, x], [0, room_d], linewidth=0.6, alpha=0.20)
+
+    for y in y_lines:
+        ax.plot([0, room_w], [y, y], linewidth=0.6, alpha=0.20)
+
+    # Room boundary
+    ax.plot([0, room_w, room_w, 0, 0], [0, 0, room_d, room_d, 0], linewidth=2.0)
+
+    # Faint cell centers
+    nx, ny = create_grid(room_w, room_d, cell_size)
+    for i in range(nx):
+        for j in range(ny):
+            cx, cy = idx_to_center(i, j, cell_size, room_w, room_d)
+            ax.scatter(cx, cy, s=8, alpha=0.10)
+
+    # People
+    for p in people:
+        if p["type"] == "standing":
+            ax.scatter(p["x"], p["y"], marker="o", s=70)
+        elif p["type"] == "sitting":
+            ax.scatter(p["x"], p["y"], marker="s", s=70)
+        else:
+            ax.scatter(p["x"], p["y"], marker="_", s=220)
+
+    # Vents
+    supply_idx = 1
+    exhaust_idx = 1
+    for v in vents:
+        if v["type"] == "supply":
+            ax.scatter(v["x"], v["y"], marker="^", s=160)
+            ax.text(v["x"], v["y"] + 0.12, f"S{supply_idx}", ha="center", va="bottom", fontsize=9)
+            supply_idx += 1
+        else:
+            ax.scatter(v["x"], v["y"], marker="v", s=160)
+            ax.text(v["x"], v["y"] + 0.12, f"E{exhaust_idx}", ha="center", va="bottom", fontsize=9)
+            exhaust_idx += 1
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf)
 
 
 def plot_heatmap(C, room_w, room_d, cell_size, vents):
-    nx, ny = C.shape
-    x_centers = [(i + 0.5) * cell_size for i in range(nx)]
-    y_centers = [(j + 0.5) * cell_size for j in range(ny)]
-
     fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
+
     im = ax.imshow(
         C.T,
         origin="lower",
@@ -220,6 +291,17 @@ def plot_heatmap(C, room_w, room_d, cell_size, vents):
         vmax=3000
     )
 
+    # Grid overlay
+    x_lines = np.arange(0, room_w + cell_size, cell_size)
+    y_lines = np.arange(0, room_d + cell_size, cell_size)
+
+    for x in x_lines:
+        ax.plot([x, x], [0, room_d], linewidth=0.4, alpha=0.12)
+
+    for y in y_lines:
+        ax.plot([0, room_w], [y, y], linewidth=0.4, alpha=0.12)
+
+    # Vents
     for v in vents:
         if v["type"] == "supply":
             ax.scatter(v["x"], v["y"], marker="^", s=120)
@@ -298,11 +380,16 @@ with left:
     st.markdown("### Current vents")
     if st.session_state.vents:
         for i, v in enumerate(st.session_state.vents, start=1):
-            st.caption(f"{i}. {v['type']} | x={v['x']:.2f} | y={v['y']:.2f} | flow={v['flow']} m³/h")
+            st.caption(
+                f"{i}. {v['type']} | x={v['x']:.2f} | y={v['y']:.2f} | flow={v['flow']} m³/h"
+            )
     else:
         st.caption("No vents yet.")
 
 
+# =========================================================
+# Recompute every rerun
+# =========================================================
 people = auto_generate_people(
     room_w, room_d,
     standing_n, sitting_n, lying_n,
@@ -324,6 +411,10 @@ avg_co2 = float(np.mean(C))
 max_co2 = float(np.max(C))
 risk_ratio = float(np.sum(C > 1000) / C.size * 100.0)
 
+
+# =========================================================
+# Right panel
+# =========================================================
 with right:
     st.subheader("Results")
 
@@ -332,12 +423,11 @@ with right:
     m2.metric("Max CO2", f"{max_co2:.0f} ppm")
     m3.metric("Area >1000 ppm", f"{risk_ratio:.1f}%")
 
-    layout_img = render_layout_image(room_w, room_d, people, st.session_state.vents)
-
-    click = streamlit_image_coordinates(
-        layout_img,
-        key="layout_click"
+    layout_img = render_layout_image(
+        room_w, room_d, cell_size, people, st.session_state.vents
     )
+
+    click = streamlit_image_coordinates(layout_img, key="layout_click")
 
     if click is not None:
         current_click = (click["x"], click["y"], click.get("time"))
@@ -350,15 +440,20 @@ with right:
                 room_w, room_d
             )
 
+            x_snap, y_snap, ix, iy = snap_to_cell_center(
+                x_m, y_m, cell_size, room_w, room_d
+            )
+
             if edit_mode == "Add vent":
-                st.session_state.vents.append({
-                    "type": pending_vent_type,
-                    "x": round(x_m, 2),
-                    "y": round(y_m, 2),
-                    "flow": int(pending_vent_flow)
-                })
+                if not vent_exists_at(x_snap, y_snap, st.session_state.vents):
+                    st.session_state.vents.append({
+                        "type": pending_vent_type,
+                        "x": x_snap,
+                        "y": y_snap,
+                        "flow": int(pending_vent_flow)
+                    })
             else:
-                idx = nearest_vent_index(x_m, y_m, st.session_state.vents)
+                idx = nearest_vent_index(x_snap, y_snap, st.session_state.vents)
                 if idx is not None:
                     st.session_state.vents.pop(idx)
 
@@ -367,5 +462,7 @@ with right:
     fig = plot_heatmap(C, room_w, room_d, cell_size, st.session_state.vents)
     st.pyplot(fig, use_container_width=True)
 
-    st.caption("Add vent: layout 그림 클릭")
-    st.caption("Delete vent: 삭제 모드에서 기존 환기구 근처 클릭")
+    st.caption("Add vent: layout 그림 클릭 → 가장 가까운 셀 중심에 설치")
+    st.caption("Delete vent: 삭제 모드에서 클릭한 셀 기준 가장 가까운 환기구 삭제")
+    st.caption("Standing=o, Sitting=square, Lying=line")
+    st.caption("Supply=triangle up, Exhaust=triangle down")
