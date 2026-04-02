@@ -9,23 +9,17 @@ import streamlit as st
 st.set_page_config(page_title="CO2 Room Simulator", layout="wide")
 
 # =========================================================
-# Constants (all in SI / meter-based units)
+# Constants
 # =========================================================
 OUTDOOR_CO2_PPM = 420.0
+DEFAULT_EDITOR_CELL_M = 1.0
 
-# Heatmap resolution and equipment editor cell size
-GRID_STEP_M = 0.20   # 20 cm
-DEFAULT_EDITOR_CELL_M = 1.0  # 1 m
-
-# Simple occupant CO2 generation assumptions (m3/h per person)
-# Very rough values for demo / comparative simulation
 CO2_GEN_M3_PER_H = {
     "standing": 0.021,
     "sitting": 0.018,
     "lying": 0.015,
 }
 
-# Human footprint sizes in meters
 HUMAN_TYPES = {
     "standing": {
         "w": 0.40,
@@ -47,8 +41,6 @@ HUMAN_TYPES = {
     },
 }
 
-# Equipment effect parameters
-# These are not CFD. They are simplified local reduction terms for comparison.
 EQUIPMENT_TYPES = {
     "Supply": {
         "color": "rgba(0,140,255,0.95)",
@@ -70,6 +62,13 @@ EQUIPMENT_TYPES = {
     },
 }
 
+# Performance knobs
+MAX_HEATMAP_CELLS = 60_000
+MAX_DRAWN_PEOPLE = 100
+FAST_MODE_OCCUPANT_THRESHOLD = 400
+FAST_MODE_AREA_THRESHOLD = 20_000
+MAX_EDITOR_BUTTONS = 400
+
 # =========================================================
 # Session state
 # =========================================================
@@ -83,7 +82,6 @@ if "last_layout_signature" not in st.session_state:
     st.session_state.last_layout_signature = None
 
 if "equipment_map" not in st.session_state:
-    # {(ix, iy): "Supply"/"Exhaust"/"Purifier"}
     st.session_state.equipment_map = {}
 
 
@@ -107,13 +105,33 @@ def can_place(candidate: Dict, placed: List[Dict]) -> bool:
     return True
 
 
-def make_grid(room_w: float, room_d: float, step_m: float = GRID_STEP_M):
+def get_adaptive_grid_step(
+    room_w: float,
+    room_d: float,
+    target_max_cells: int = MAX_HEATMAP_CELLS,
+) -> float:
+    room_area = max(room_w * room_d, 1e-9)
+    raw_step = math.sqrt(room_area / target_max_cells)
+    step = max(0.5, raw_step)
+
+    candidate_steps = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    for s in candidate_steps:
+        if s >= step:
+            return s
+    return candidate_steps[-1]
+
+
+def make_grid(room_w: float, room_d: float, step_m: float):
     nx = max(2, int(math.ceil(room_w / step_m)) + 1)
     ny = max(2, int(math.ceil(room_d / step_m)) + 1)
     xs = np.linspace(0.0, room_w, nx)
     ys = np.linspace(0.0, room_d, ny)
     X, Y = np.meshgrid(xs, ys)
     return X, Y
+
+
+def is_fast_mode(room_w: float, room_d: float, total_people: int) -> bool:
+    return total_people > FAST_MODE_OCCUPANT_THRESHOLD or (room_w * room_d) > FAST_MODE_AREA_THRESHOLD
 
 
 def generate_random_people(
@@ -125,7 +143,8 @@ def generate_random_people(
     seed: int = 0,
 ) -> List[Dict]:
     rng = random.Random(seed)
-    placed = []
+    total_people = n_standing + n_sitting + n_lying
+    fast_mode = is_fast_mode(room_w, room_d, total_people)
 
     request = (
         [("standing", i) for i in range(n_standing)]
@@ -134,6 +153,34 @@ def generate_random_people(
     )
     rng.shuffle(request)
 
+    placed = []
+
+    # Fast mode: skip non-overlap search
+    if fast_mode:
+        for kind, _ in request:
+            spec = HUMAN_TYPES[kind]
+            w, d = spec["w"], spec["d"]
+
+            if kind == "lying" and rng.random() < 0.5:
+                w, d = d, w
+
+            x = rng.uniform(0.0, max(room_w - w, 0.0))
+            y = rng.uniform(0.0, max(room_d - d, 0.0))
+
+            placed.append(
+                {
+                    "type": kind,
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "d": d,
+                    "co2_gen": spec["co2_gen"],
+                    "label": spec["label"],
+                }
+            )
+        return placed
+
+    # Precision mode: non-overlapping placement
     for kind, _ in request:
         spec = HUMAN_TYPES[kind]
         base_w, base_d = spec["w"], spec["d"]
@@ -143,7 +190,7 @@ def generate_random_people(
             orientations.append((base_d, base_w))
 
         success = False
-        for _ in range(400):
+        for _ in range(120):
             w, d = rng.choice(orientations)
 
             if room_w <= w or room_d <= d:
@@ -166,10 +213,6 @@ def generate_random_people(
                 placed.append(candidate)
                 success = True
                 break
-
-        if not success:
-            # Skip if room too crowded
-            continue
 
     return placed
 
@@ -236,13 +279,6 @@ def compute_well_mixed_baseline_ppm(
     ach: float,
     people: List[Dict],
 ) -> Tuple[float, float, float]:
-    """
-    Very simplified steady-state style estimate:
-    delta_ppm ≈ 1e6 * G / Q
-    where
-      G = total CO2 generation [m3/h]
-      Q = ventilation flow [m3/h] = ACH * Volume
-    """
     volume_m3 = room_w * room_d * room_h
     q_vent_m3ph = max(ach * volume_m3, 0.001)
     g_total_m3ph = sum(p["co2_gen"] for p in people)
@@ -260,8 +296,9 @@ def compute_co2_field(
     ach: float,
     people: List[Dict],
     equipments: List[Dict],
+    grid_step_m: float,
 ):
-    X, Y = make_grid(room_w, room_d, GRID_STEP_M)
+    X, Y = make_grid(room_w, room_d, grid_step_m)
 
     volume_m3, q_vent_m3ph, baseline_ppm = compute_well_mixed_baseline_ppm(
         room_w, room_d, room_h, ach, people
@@ -269,37 +306,49 @@ def compute_co2_field(
 
     Z = np.ones_like(X, dtype=float) * baseline_ppm
 
-    # Local occupant plume / source bump
-    for p in people:
-        cx = p["x"] + p["w"] / 2.0
-        cy = p["y"] + p["d"] / 2.0
+    fast_mode = is_fast_mode(room_w, room_d, len(people))
 
-        # Local spread scale
-        sigma = max((p["w"] + p["d"]) / 2.0, 0.35)
-        dist2 = (X - cx) ** 2 + (Y - cy) ** 2
+    # Precision mode only: local human plume
+    if not fast_mode:
+        for p in people:
+            cx = p["x"] + p["w"] / 2.0
+            cy = p["y"] + p["d"] / 2.0
 
-        # Local intensity scales down if ACH is strong
-        local_amp = 90.0 / max(math.sqrt(ach + 0.2), 0.5)
-        if p["type"] == "standing":
-            local_amp *= 1.05
-        elif p["type"] == "lying":
-            local_amp *= 0.9
+            sigma = max((p["w"] + p["d"]) / 2.0, max(0.35, grid_step_m * 1.2))
+            dist2 = (X - cx) ** 2 + (Y - cy) ** 2
 
-        Z += local_amp * np.exp(-dist2 / (2.0 * sigma**2))
+            local_amp = 90.0 / max(math.sqrt(ach + 0.2), 0.5)
+            if p["type"] == "standing":
+                local_amp *= 1.05
+            elif p["type"] == "lying":
+                local_amp *= 0.9
 
-    # Local equipment reduction
+            Z += local_amp * np.exp(-dist2 / (2.0 * sigma**2))
+
+    # Equipment effect always included
     for eq in equipments:
         cx = eq["x"] + eq["w"] / 2.0
         cy = eq["y"] + eq["d"] / 2.0
-        sigma = max(eq["radius_m"], 0.5)
+        sigma = max(eq["radius_m"], max(0.5, grid_step_m * 1.2))
         dist2 = (X - cx) ** 2 + (Y - cy) ** 2
 
-        # More ACH means room already better mixed, so local advantage slightly weaker
         reduction = eq["ppm_reduction"] / max(1.0 + 0.15 * ach, 1.0)
         Z -= reduction * np.exp(-dist2 / (2.0 * sigma**2))
 
     Z = np.clip(Z, OUTDOOR_CO2_PPM, 5000.0)
-    return X, Y, Z, volume_m3, q_vent_m3ph, baseline_ppm
+    return X, Y, Z, volume_m3, q_vent_m3ph, baseline_ppm, fast_mode
+
+
+def sample_people_for_drawing(
+    people: List[Dict],
+    max_draw: int = MAX_DRAWN_PEOPLE,
+) -> Tuple[List[Dict], bool]:
+    if len(people) <= max_draw:
+        return people, False
+
+    rng = random.Random(12345)
+    sampled = rng.sample(people, max_draw)
+    return sampled, True
 
 
 def add_people_shapes(fig: go.Figure, people: List[Dict]) -> None:
@@ -326,7 +375,7 @@ def add_people_shapes(fig: go.Figure, people: List[Dict]) -> None:
                 y=[p["y"] + p["d"] / 2.0],
                 mode="text",
                 text=[p["label"][0]],
-                textfont=dict(color="white", size=10),
+                textfont=dict(color="white", size=9),
                 showlegend=False,
                 hoverinfo="skip",
             )
@@ -369,7 +418,7 @@ def add_editor_grid(fig: go.Figure, room_w: float, room_d: float, cell_size_m: f
             y0=0.0,
             x1=x,
             y1=room_d,
-            line=dict(color="rgba(255,255,255,0.18)", width=1),
+            line=dict(color="rgba(255,255,255,0.14)", width=1),
         )
     for y in ys:
         fig.add_shape(
@@ -378,7 +427,7 @@ def add_editor_grid(fig: go.Figure, room_w: float, room_d: float, cell_size_m: f
             y0=y,
             x1=room_w,
             y1=y,
-            line=dict(color="rgba(255,255,255,0.18)", width=1),
+            line=dict(color="rgba(255,255,255,0.14)", width=1),
         )
 
 
@@ -388,7 +437,7 @@ def make_heatmap_figure(
     X,
     Y,
     Z,
-    people: List[Dict],
+    drawn_people: List[Dict],
     equipments: List[Dict],
     cell_size_m: float,
 ) -> go.Figure:
@@ -408,7 +457,7 @@ def make_heatmap_figure(
     )
 
     add_editor_grid(fig, room_w, room_d, cell_size_m)
-    add_people_shapes(fig, people)
+    add_people_shapes(fig, drawn_people)
     add_equipment_shapes(fig, equipments)
 
     fig.update_layout(
@@ -416,7 +465,7 @@ def make_heatmap_figure(
         height=540,
         autosize=False,
         margin=dict(l=20, r=20, t=45, b=20),
-        title="CO2 Heatmap (Fixed Size, meter-based)",
+        title="CO2 Heatmap (Fixed Size, optimized)",
     )
 
     fig.update_xaxes(
@@ -454,21 +503,34 @@ def trim_equipment_map(room_w: float, room_d: float, cell_size_m: float) -> None
     }
 
 
+def recommend_editor_cell_size(room_w: float, room_d: float, current_cell: float) -> float:
+    area = room_w * room_d
+    if area > 2_000_000:
+        return max(current_cell, 50.0)
+    if area > 500_000:
+        return max(current_cell, 20.0)
+    if area > 100_000:
+        return max(current_cell, 10.0)
+    if area > 20_000:
+        return max(current_cell, 5.0)
+    return current_cell
+
+
 # =========================================================
 # Sidebar
 # =========================================================
 st.sidebar.header("Room Settings")
 
-room_w = st.sidebar.slider("Room Width (m)", min_value=2.0, max_value=30.0, value=10.0, step=0.5)
-room_d = st.sidebar.slider("Room Depth (m)", min_value=2.0, max_value=10.0, value=5.0, step=0.5)
+room_w = st.sidebar.slider("Room Width (m)", min_value=2.0, max_value=5000.0, value=50.0, step=1.0)
+room_d = st.sidebar.slider("Room Depth (m)", min_value=2.0, max_value=1000.0, value=20.0, step=1.0)
 room_h = st.sidebar.slider("Room Height (m)", min_value=2.0, max_value=6.0, value=3.0, step=0.1)
 
 ach = st.sidebar.slider("Ventilation ACH (1/h)", min_value=0.1, max_value=20.0, value=3.0, step=0.1)
 
 st.sidebar.header("Population")
-n_standing = st.sidebar.number_input("Standing people", min_value=0, max_value=200, value=5, step=1)
-n_sitting = st.sidebar.number_input("Sitting people", min_value=0, max_value=200, value=3, step=1)
-n_lying = st.sidebar.number_input("Lying people", min_value=0, max_value=200, value=1, step=1)
+n_standing = st.sidebar.number_input("Standing people", min_value=0, max_value=3000, value=5, step=1)
+n_sitting = st.sidebar.number_input("Sitting people", min_value=0, max_value=3000, value=3, step=1)
+n_lying = st.sidebar.number_input("Lying people", min_value=0, max_value=3000, value=1, step=1)
 
 st.sidebar.header("Equipment Editor")
 selected_tool = st.sidebar.radio(
@@ -479,7 +541,7 @@ selected_tool = st.sidebar.radio(
 
 editor_step = st.sidebar.select_slider(
     "Cell Size (m)",
-    options=[0.5, 1.0, 1.5, 2.0],
+    options=[0.5, 1.0, 1.5, 2.0, 5.0, 10.0, 20.0, 50.0],
     value=DEFAULT_EDITOR_CELL_M,
 )
 
@@ -493,6 +555,7 @@ with btn_col2:
     if st.button("Clear Equipments"):
         st.session_state.equipment_map = {}
 
+recommended_editor_step = recommend_editor_cell_size(room_w, room_d, editor_step)
 trim_equipment_map(room_w, room_d, editor_step)
 
 # =========================================================
@@ -503,11 +566,14 @@ ensure_people_layout(room_w, room_d, n_standing, n_sitting, n_lying)
 people = st.session_state.people_layout
 equipments = equipment_list_from_map(st.session_state.equipment_map, room_w, room_d, editor_step)
 
-X, Y, Z, volume_m3, q_vent_m3ph, baseline_ppm = compute_co2_field(
-    room_w, room_d, room_h, ach, people, equipments
+grid_step_m = get_adaptive_grid_step(room_w, room_d)
+
+X, Y, Z, volume_m3, q_vent_m3ph, baseline_ppm, fast_mode = compute_co2_field(
+    room_w, room_d, room_h, ach, people, equipments, grid_step_m
 )
 
-fig = make_heatmap_figure(room_w, room_d, X, Y, Z, people, equipments, editor_step)
+drawn_people, people_sampled = sample_people_for_drawing(people, MAX_DRAWN_PEOPLE)
+fig = make_heatmap_figure(room_w, room_d, X, Y, Z, drawn_people, equipments, editor_step)
 
 # =========================================================
 # Main UI
@@ -524,18 +590,26 @@ m5.metric("Population", f"{len(people)}")
 s1, s2, s3 = st.columns(3)
 s1.metric("Ventilation Flow", f"{q_vent_m3ph:.1f} m³/h")
 s2.metric("Well-mixed baseline", f"{baseline_ppm:.0f} ppm")
-s3.metric("Outdoor CO2", f"{OUTDOOR_CO2_PPM:.0f} ppm")
+s3.metric("Grid Step", f"{grid_step_m:.2f} m")
 
-if len(people) < (n_standing + n_sitting + n_lying):
-    st.warning("Room is crowded, so some people could not be placed without overlap.")
+if fast_mode:
+    st.info("Fast mode is active. Occupant placement and local plume calculations are simplified for performance.")
+
+if people_sampled:
+    st.info(f"Only {MAX_DRAWN_PEOPLE} occupants are drawn on the heatmap for performance.")
+
+if recommended_editor_step > editor_step:
+    st.warning(
+        f"This room is very large. Recommended Cell Size: {recommended_editor_step:.1f} m or larger."
+    )
 
 st.plotly_chart(fig, use_container_width=False)
 
 # =========================================================
-# Editor
+# Equipment editor
 # =========================================================
 st.subheader("Equipment Cell Editor")
-st.caption("Choose a tool in the sidebar, then click a cell below to place or erase equipment.")
+st.caption("Choose a tool in the sidebar, then place or erase equipment.")
 
 legend_cols = st.columns(4)
 legend_cols[0].markdown("**S** = Supply")
@@ -545,36 +619,48 @@ legend_cols[3].markdown("**·** = Empty")
 
 nx = max(1, int(room_w // editor_step))
 ny = max(1, int(room_d // editor_step))
+editor_buttons = nx * ny
 
-if nx > 35:
-    st.info("The editor may feel heavy with many columns. Increase Cell Size if needed.")
+if editor_buttons > MAX_EDITOR_BUTTONS:
+    st.warning(
+        f"Editor grid is too large to render safely ({editor_buttons} cells). "
+        f"Use coordinate placement below or increase Cell Size."
+    )
 
-for iy in range(ny):
-    cols = st.columns(nx + 1)
-    cols[0].markdown(f"**{iy}**")
-    for ix in range(nx):
-        key = (ix, iy)
-        current = st.session_state.equipment_map.get(key)
-
-        if current is None:
-            label = "·"
-        else:
-            label = EQUIPMENT_TYPES[current]["symbol"]
-
-        if cols[ix + 1].button(
-            label,
-            key=f"cell_{ix}_{iy}_{editor_step}_{room_w}_{room_d}",
-            use_container_width=True,
-        ):
-            toggle_equipment(ix, iy, selected_tool)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        place_x = st.number_input("Cell X", min_value=0, max_value=max(nx - 1, 0), value=0, step=1)
+    with c2:
+        place_y = st.number_input("Cell Y", min_value=0, max_value=max(ny - 1, 0), value=0, step=1)
+    with c3:
+        if st.button("Apply Equipment"):
+            toggle_equipment(int(place_x), int(place_y), selected_tool)
             st.rerun()
+else:
+    for iy in range(ny):
+        cols = st.columns(nx + 1)
+        cols[0].markdown(f"**{iy}**")
+        for ix in range(nx):
+            key = (ix, iy)
+            current = st.session_state.equipment_map.get(key)
+            label = "·" if current is None else EQUIPMENT_TYPES[current]["symbol"]
+
+            if cols[ix + 1].button(
+                label,
+                key=f"cell_{ix}_{iy}_{editor_step}_{room_w}_{room_d}",
+                use_container_width=True,
+            ):
+                toggle_equipment(ix, iy, selected_tool)
+                st.rerun()
 
 # =========================================================
 # Details
 # =========================================================
 with st.expander("Placed People Details"):
     if people:
-        for i, p in enumerate(people, 1):
+        show_limit = min(len(people), 300)
+        st.write(f"Showing first {show_limit} of {len(people)} occupants.")
+        for i, p in enumerate(people[:show_limit], 1):
             st.write(
                 f"{i}. {p['label']} | x={p['x']:.2f} m, y={p['y']:.2f} m, "
                 f"w={p['w']:.2f} m, d={p['d']:.2f} m"
@@ -595,14 +681,10 @@ with st.expander("Placed Equipments"):
 with st.expander("Model Notes"):
     st.markdown(
         """
-- All geometric inputs are in **meters**.
-- The baseline CO2 is estimated from a simple steady-state relation using:
-  - room volume,
-  - ACH,
-  - and total occupant CO2 generation.
-- The heatmap then adds:
-  - local increases around occupants,
-  - and local reductions around placed equipment.
-- This is a **comparative simulation model**, not CFD.
+- All geometric inputs are in meters.
+- Baseline CO2 uses a simplified steady-state relation from volume, ACH, and total occupant generation.
+- In fast mode, individual occupant overlap checks and local plume additions are simplified.
+- Equipment effects are still applied as local reductions.
+- This is a comparative simulation model, not CFD.
 """
     )
