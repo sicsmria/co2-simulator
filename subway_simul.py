@@ -481,6 +481,9 @@ with right:
         config={"scrollZoom": False}
     )
 
+    st.write(event)
+    st.write(st.session_state.get("layout_editor"))
+    
     payload = extract_payload_from_event(event)
     if payload is None:
         payload = extract_payload_from_session("layout_editor")
@@ -502,3 +505,4 @@ with right:
 
     st.caption("Add vent: 위쪽 Layout editor의 grid 점 클릭")
     st.caption("Delete vent: 위쪽 Layout editor의 삼각형 환기구 클릭")
+
