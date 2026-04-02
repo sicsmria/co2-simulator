@@ -1,6 +1,7 @@
 import io
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle, Circle
 from PIL import Image
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -39,14 +40,13 @@ def idx_to_center(ix, iy, cell_size, room_w, room_d):
 
 
 def snap_to_cell_center(x, y, cell_size, room_w, room_d):
-    ix = int(x / cell_size)
-    iy = int(y / cell_size)
+    nx, ny = create_grid(room_w, room_d, cell_size)
 
-    max_ix = max(0, int(np.ceil(room_w / cell_size)) - 1)
-    max_iy = max(0, int(np.ceil(room_d / cell_size)) - 1)
+    ix = int(np.floor(x / cell_size))
+    iy = int(np.floor(y / cell_size))
 
-    ix = min(max(ix, 0), max_ix)
-    iy = min(max(iy, 0), max_iy)
+    ix = min(max(ix, 0), nx - 1)
+    iy = min(max(iy, 0), ny - 1)
 
     x_snap, y_snap = idx_to_center(ix, iy, cell_size, room_w, room_d)
     return x_snap, y_snap, ix, iy
@@ -101,7 +101,7 @@ def apply_people_source(C, people, cell_size, nx, ny, dt_h, room_h):
 
     for p in people:
         ix, iy = pos_to_idx(p["x"], p["y"], cell_size, nx, ny)
-        G = get_activity_co2_rate(p["activity"])  # m3/h
+        G = get_activity_co2_rate(p["activity"])
         delta_ppm = (G / cell_volume) * 1e6 * dt_h
         C[ix, iy] += delta_ppm
 
@@ -203,9 +203,10 @@ def auto_generate_people(
 
 
 # =========================================================
-# Coordinate conversion for clicked image
+# Coordinate conversion
 # =========================================================
 def pixel_to_room_coords(px, py, img_w, img_h, room_w, room_d):
+    # axes fills the whole image, so direct mapping is valid
     x = (px / img_w) * room_w
     y = room_d - (py / img_h) * room_d
     x = min(max(x, 0.0), room_w)
@@ -216,12 +217,43 @@ def pixel_to_room_coords(px, py, img_w, img_h, room_w, room_d):
 # =========================================================
 # Rendering
 # =========================================================
+def draw_person_on_ax(ax, person, cell_size):
+    if person["type"] == "standing":
+        ax.scatter(person["x"], person["y"], marker="o", s=70)
+    elif person["type"] == "sitting":
+        ax.scatter(person["x"], person["y"], marker="s", s=70)
+    else:
+        body_w = min(0.70, cell_size * 0.75)
+        body_h = min(0.22, cell_size * 0.28)
+        ax.add_patch(
+            Rectangle(
+                (person["x"] - body_w / 2, person["y"] - body_h / 2),
+                body_w,
+                body_h,
+                fill=True,
+                alpha=0.85
+            )
+        )
+        ax.add_patch(
+            Circle(
+                (person["x"] - body_w / 2 - 0.08, person["y"]),
+                radius=min(0.08, cell_size * 0.10),
+                fill=True,
+                alpha=0.85
+            )
+        )
+
+
 def render_layout_image(room_w, room_d, cell_size, people, vents):
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
+    max_side = max(room_w, room_d)
+    fig_w = 8.0 * (room_w / max_side)
+    fig_h = 8.0 * (room_d / max_side)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=160)
 
     ax.set_xlim(0, room_w)
     ax.set_ylim(0, room_d)
-    ax.set_aspect("equal")
+    ax.set_aspect("equal", adjustable="box")
 
     ax.set_xticks([])
     ax.set_yticks([])
@@ -229,8 +261,8 @@ def render_layout_image(room_w, room_d, cell_size, people, vents):
         spine.set_visible(False)
 
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    ax.set_position([0, 0, 1, 1])
 
-    # Grid lines
     x_lines = np.arange(0, room_w + cell_size, cell_size)
     y_lines = np.arange(0, room_d + cell_size, cell_size)
 
@@ -240,26 +272,17 @@ def render_layout_image(room_w, room_d, cell_size, people, vents):
     for y in y_lines:
         ax.plot([0, room_w], [y, y], linewidth=0.6, alpha=0.20)
 
-    # Room boundary
     ax.plot([0, room_w, room_w, 0, 0], [0, 0, room_d, room_d, 0], linewidth=2.0)
 
-    # Faint cell centers
     nx, ny = create_grid(room_w, room_d, cell_size)
     for i in range(nx):
         for j in range(ny):
             cx, cy = idx_to_center(i, j, cell_size, room_w, room_d)
             ax.scatter(cx, cy, s=8, alpha=0.10)
 
-    # People
     for p in people:
-        if p["type"] == "standing":
-            ax.scatter(p["x"], p["y"], marker="o", s=70)
-        elif p["type"] == "sitting":
-            ax.scatter(p["x"], p["y"], marker="s", s=70)
-        else:
-            ax.scatter(p["x"], p["y"], marker="_", s=220)
+        draw_person_on_ax(ax, p, cell_size)
 
-    # Vents
     supply_idx = 1
     exhaust_idx = 1
     for v in vents:
@@ -273,7 +296,7 @@ def render_layout_image(room_w, room_d, cell_size, people, vents):
             exhaust_idx += 1
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png")
+    fig.savefig(buf, format="png", dpi=160)
     plt.close(fig)
     buf.seek(0)
     return Image.open(buf)
@@ -291,7 +314,6 @@ def plot_heatmap(C, room_w, room_d, cell_size, vents):
         vmax=3000
     )
 
-    # Grid overlay
     x_lines = np.arange(0, room_w + cell_size, cell_size)
     y_lines = np.arange(0, room_d + cell_size, cell_size)
 
@@ -301,7 +323,6 @@ def plot_heatmap(C, room_w, room_d, cell_size, vents):
     for y in y_lines:
         ax.plot([0, room_w], [y, y], linewidth=0.4, alpha=0.12)
 
-    # Vents
     for v in vents:
         if v["type"] == "supply":
             ax.scatter(v["x"], v["y"], marker="^", s=120)
@@ -464,5 +485,5 @@ with right:
 
     st.caption("Add vent: layout 그림 클릭 → 가장 가까운 셀 중심에 설치")
     st.caption("Delete vent: 삭제 모드에서 클릭한 셀 기준 가장 가까운 환기구 삭제")
-    st.caption("Standing=o, Sitting=square, Lying=line")
+    st.caption("Standing=o, Sitting=square, Lying=block")
     st.caption("Supply=triangle up, Exhaust=triangle down")
