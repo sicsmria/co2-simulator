@@ -310,14 +310,48 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     nx = max(1, int(math.ceil(room_w / cell_size_m)))
     ny = max(1, int(math.ceil(room_d / cell_size_m)))
 
-    viewport_cols = st.slider("Visible grid width (cells)", 5, min(20, nx), min(10, nx), key="viewport_cols")
-    viewport_rows = st.slider("Visible grid depth (cells)", 5, min(20, ny), min(10, ny), key="viewport_rows")
+    max_cols = min(20, nx)
+    max_rows = min(20, ny)
+
+    min_cols = 1 if nx < 5 else 5
+    min_rows = 1 if ny < 5 else 5
+
+    default_cols = min(10, nx)
+    default_rows = min(10, ny)
+
+    viewport_cols = st.slider(
+        "Visible grid width (cells)",
+        min_value=min_cols,
+        max_value=max_cols,
+        value=default_cols,
+        key="viewport_cols",
+    )
+
+    viewport_rows = st.slider(
+        "Visible grid depth (cells)",
+        min_value=min_rows,
+        max_value=max_rows,
+        value=default_rows,
+        key="viewport_rows",
+    )
 
     max_start_x = max(0, nx - viewport_cols)
     max_start_y = max(0, ny - viewport_rows)
 
-    start_x = st.number_input("Grid start X index", min_value=0, max_value=max_start_x, value=0, step=1)
-    start_y = st.number_input("Grid start Y index", min_value=0, max_value=max_start_y, value=0, step=1)
+    start_x = st.number_input(
+        "Grid start X index",
+        min_value=0,
+        max_value=max_start_x,
+        value=0,
+        step=1,
+    )
+    start_y = st.number_input(
+        "Grid start Y index",
+        min_value=0,
+        max_value=max_start_y,
+        value=0,
+        step=1,
+    )
 
     st.caption(
         f"Room grid: {nx} × {ny} cells | "
