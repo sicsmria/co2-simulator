@@ -72,36 +72,27 @@ def make_grid(room_w: float, room_d: float, step_m: float):
     ys = np.linspace(0.0, room_d, ny)
     return np.meshgrid(xs, ys)
 
-def equipment_list_from_map(equipment_map: Dict, room_w: float, room_d: float, cell_size_m: float) -> List[Dict]:
+def equipment_list_from_map(equipment_map: Dict, room_w: float, room_d: float) -> List[Dict]:
     equipments = []
-    
-    nx = max(2, int(round(room_w / cell_size_m)) + 1)
-    ny = max(2, int(round(room_d / cell_size_m)) + 1)
-    
-    # 양 끝 모서리에 딱 맞도록 실제 노드 간 간격(dx, dy) 계산
+    # 항상 11개의 점(10칸)으로 공간을 나눔
+    nx, ny = 11, 11
     dx = room_w / (nx - 1)
     dy = room_d / (ny - 1)
 
     for (ix, iy), eq_type in equipment_map.items():
         if 0 <= ix < nx and 0 <= iy < ny and eq_type in EQUIPMENT_TYPES:
             eq = EQUIPMENT_TYPES[eq_type]
-            
-            # 교차점의 정확한 물리적 위치 (0 ~ room_w/room_d)
-            cx = ix * dx
-            cy = iy * dy
-            
             equipments.append({
-                "ix": ix,
-                "iy": iy,
-                "x": cx - 0.5, # 1m 규격 설비의 중심을 맞추기 위해 0.5m 이동
-                "y": cy - 0.5,
-                "w": 1.0,      # 1m x 1m 고정 규격
+                "ix": ix, "iy": iy,
+                "x": (ix * dx) - 0.5, # 1m 크기 설비의 중심을 정확한 좌표에 맞춤
+                "y": (iy * dy) - 0.5,
+                "w": 1.0,             # 설비 자체의 크기는 1m * 1m로 고정
                 "d": 1.0,
                 "type": eq_type,
                 **eq
             })
     return equipments
-
+    
 def compute_transient_baseline_ppm(
     room_w: float, room_d: float, room_h: float, ach: float,
     n_standing: int, n_sitting: int, n_lying: int, elapsed_time_h: float
@@ -292,13 +283,11 @@ def toggle_equipment(ix: int, iy: int, selected_tool: str) -> None:
     else:
         st.session_state.equipment_map[key] = selected_tool
 
-def trim_equipment_map(room_w: float, room_d: float, cell_size_m: float) -> None:
-    # 노드(교차점) 개수 계산: 양 끝 모서리를 포함하므로 최소 2개
-    nx = max(2, int(round(room_w / cell_size_m)) + 1)
-    ny = max(2, int(round(room_d / cell_size_m)) + 1)
+def trim_equipment_map(room_w: float, room_d: float) -> None:
+    # 방 크기에 상관없이 항상 10등분(11개 교차점) 기준 내의 데이터만 유지
     st.session_state.equipment_map = {
         k: v for k, v in st.session_state.equipment_map.items()
-        if k[0] < nx and k[1] < ny
+        if k[0] < 11 and k[1] < 11
     }
 
 def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
@@ -321,37 +310,18 @@ def cell_label(ix: int, iy: int) -> str:
         return EQUIPMENT_TYPES[eq_type]["label"]
     return EMPTY_CELL_LABEL
 
-def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, selected_tool: str):
+def render_equipment_editor(room_w: float, room_d: float, selected_tool: str):
     st.markdown("### Equipment Placement Grid")
-
-    nx = max(2, int(round(room_w / cell_size_m)) + 1)
-    ny = max(2, int(round(room_d / cell_size_m)) + 1)
     
-    # 공간 크기에 따라 동적으로 결정된 셀 간격
-    dx = room_w / (nx - 1)
-    dy = room_d / (ny - 1)
+    # 그리드 화면 무조건 10등분 고정
+    DIVISIONS = 10
+    nx = DIVISIONS + 1
+    ny = DIVISIONS + 1
+    
+    dx = room_w / DIVISIONS
+    dy = room_d / DIVISIONS
 
-    MAX_DISPLAY = 12 
-    viewport_cols = min(nx, MAX_DISPLAY)
-    viewport_rows = min(ny, MAX_DISPLAY)
-
-    need_pagination_x = nx > MAX_DISPLAY
-    need_pagination_y = ny > MAX_DISPLAY
-
-    start_x, start_y = 0, 0
-    if need_pagination_x or need_pagination_y:
-        st.caption(f"💡 공간이 넓습니다 ({nx}×{ny} 칸). 아래 숫자를 조절해 그리드를 이동하세요.")
-        c1, c2 = st.columns(2)
-        with c1:
-            if need_pagination_x:
-                start_x = st.number_input("X축 이동 (가로)", min_value=0, max_value=nx - viewport_cols, value=st.session_state.get("start_x", 0), step=1)
-                st.session_state.start_x = start_x
-        with c2:
-            if need_pagination_y:
-                start_y = st.number_input("Y축 이동 (세로)", min_value=0, max_value=ny - viewport_rows, value=st.session_state.get("start_y", 0), step=1)
-                st.session_state.start_y = start_y
-    else:
-        st.caption(f"💡 양 끝 모서리에 맞게 자동 분할되었습니다. (실제 간격: 가로 {dx:.1f}m, 세로 {dy:.1f}m)")
+    st.caption(f"💡 모서리 기준 자동 분할: 공간 전체가 {DIVISIONS}등분 되었습니다. (간격: 가로 {dx:.1f}m, 세로 {dy:.1f}m)")
 
     legend_cols = st.columns(4)
     legend_cols[0].markdown(f"**{EQUIPMENT_TYPES['Supply']['label']} Supply**")
@@ -359,23 +329,24 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     legend_cols[2].markdown(f"**{EQUIPMENT_TYPES['Purifier']['label']} Purifier**")
     legend_cols[3].markdown(f"**{EMPTY_CELL_LABEL} Empty**")
 
-    # Y라벨 공간을 약간 넓혀서 미터(m) 표시가 잘 보이게 조정
-    col_ratios = [0.8] + [1.0] * viewport_cols
+    col_ratios = [0.8] + [1.0] * nx
 
+    # X축 (상단 라벨)
     header_cols = st.columns(col_ratios)
     header_cols[0].write("") 
-    for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
+    for ix in range(nx):
         actual_x = ix * dx
-        header_cols[local_x].markdown(f"<div style='text-align: center; color: gray; font-size: 0.8em; padding-bottom: 5px;'>X{ix}<br>({actual_x:.1f}m)</div>", unsafe_allow_html=True)
+        header_cols[ix + 1].markdown(f"<div style='text-align: center; color: gray; font-size: 0.8em; padding-bottom: 5px;'>X{ix}<br>({actual_x:.1f}m)</div>", unsafe_allow_html=True)
 
-    for iy in range(start_y, start_y + viewport_rows):
+    # Y축 및 버튼 배치
+    for iy in range(ny):
         cols = st.columns(col_ratios)
         actual_y = iy * dy
         cols[0].markdown(f"<div style='padding-top: 8px; font-weight: bold; color: gray; font-size: 0.85em;'>Y{iy}<br>({actual_y:.1f}m)</div>", unsafe_allow_html=True)
         
-        for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
+        for ix in range(nx):
             label = cell_label(ix, iy)
-            if cols[local_x].button(label, key=f"cell_{ix}_{iy}", use_container_width=True):
+            if cols[ix + 1].button(label, key=f"cell_{ix}_{iy}", use_container_width=True):
                 toggle_equipment(ix, iy, selected_tool)
                 st.rerun()
 # =========================================================
