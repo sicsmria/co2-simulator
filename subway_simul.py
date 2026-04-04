@@ -319,11 +319,23 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     default_cols = min(10, nx)
     default_rows = min(10, ny)
 
+    # 이전 session_state 값이 현재 범위를 벗어나지 않도록 강제 보정
+    if "viewport_cols" not in st.session_state:
+        st.session_state.viewport_cols = default_cols
+    st.session_state.viewport_cols = max(
+        min_cols, min(max_cols, st.session_state.viewport_cols)
+    )
+
+    if "viewport_rows" not in st.session_state:
+        st.session_state.viewport_rows = default_rows
+    st.session_state.viewport_rows = max(
+        min_rows, min(max_rows, st.session_state.viewport_rows)
+    )
+
     viewport_cols = st.slider(
         "Visible grid width (cells)",
         min_value=min_cols,
         max_value=max_cols,
-        value=default_cols,
         key="viewport_cols",
     )
 
@@ -331,25 +343,32 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
         "Visible grid depth (cells)",
         min_value=min_rows,
         max_value=max_rows,
-        value=default_rows,
         key="viewport_rows",
     )
 
     max_start_x = max(0, nx - viewport_cols)
     max_start_y = max(0, ny - viewport_rows)
 
+    if "start_x" not in st.session_state:
+        st.session_state.start_x = 0
+    st.session_state.start_x = max(0, min(max_start_x, st.session_state.start_x))
+
+    if "start_y" not in st.session_state:
+        st.session_state.start_y = 0
+    st.session_state.start_y = max(0, min(max_start_y, st.session_state.start_y))
+
     start_x = st.number_input(
         "Grid start X index",
         min_value=0,
         max_value=max_start_x,
-        value=0,
+        key="start_x",
         step=1,
     )
     start_y = st.number_input(
         "Grid start Y index",
         min_value=0,
         max_value=max_start_y,
-        value=0,
+        key="start_y",
         step=1,
     )
 
