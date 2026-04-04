@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple, List
+from typing import Dict, List
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -11,7 +11,6 @@ st.set_page_config(page_title="CO2 Room Simulator", layout="wide")
 # =========================================================
 OUTDOOR_CO2_PPM = 420.0
 MAX_HEATMAP_CELLS = 15000
-MAX_DISPLAY_PEOPLE = 1200  # 너무 많은 점 표시 방지
 
 CO2_GEN_M3_PER_H = {
     "standing": 0.021,
@@ -25,20 +24,25 @@ EQUIPMENT_TYPES = {
         "symbol": "S",
         "radius_m": 8.0,
         "ppm_reduction": 120.0,
+        "label": "🟦",
     },
     "Exhaust": {
         "color": "rgba(255,90,90,0.95)",
         "symbol": "E",
         "radius_m": 10.0,
         "ppm_reduction": 150.0,
+        "label": "🟥",
     },
     "Purifier": {
         "color": "rgba(0,180,120,0.95)",
         "symbol": "P",
         "radius_m": 6.0,
         "ppm_reduction": 90.0,
+        "label": "🟩",
     },
 }
+
+EMPTY_CELL_LABEL = "·"
 
 if "equipment_map" not in st.session_state:
     st.session_state.equipment_map = {}
@@ -66,7 +70,9 @@ def make_grid(room_w: float, room_d: float, step_m: float):
 
 def equipment_list_from_map(equipment_map: Dict, room_w: float, room_d: float, cell_size_m: float) -> List[Dict]:
     equipments = []
-    nx, ny = int(room_w // cell_size_m), int(room_d // cell_size_m)
+    nx = max(1, int(math.ceil(room_w / cell_size_m)))
+    ny = max(1, int(math.ceil(room_d / cell_size_m)))
+
     for (ix, iy), eq_type in equipment_map.items():
         if 0 <= ix < nx and 0 <= iy < ny and eq_type in EQUIPMENT_TYPES:
             eq = EQUIPMENT_TYPES[eq_type]
@@ -96,7 +102,11 @@ def compute_transient_baseline_ppm(
     )
 
     steady_state_delta = 1_000_000.0 * g_total / q_vent_m3ph
-    current_delta = steady_state_delta * (1.0 - math.exp(-ach * elapsed_time_h)) if ach > 0 else (1_000_000.0 * g_total * elapsed_time_h / max(volume_m3, 1e-9))
+
+    if ach > 0:
+        current_delta = steady_state_delta * (1.0 - math.exp(-ach * elapsed_time_h))
+    else:
+        current_delta = 1_000_000.0 * g_total * elapsed_time_h / max(volume_m3, 1e-9)
 
     baseline_ppm = OUTDOOR_CO2_PPM + current_delta
     return volume_m3, q_vent_m3ph, baseline_ppm
@@ -110,8 +120,7 @@ def compute_equipment_field(
     X, Y = make_grid(room_w, room_d, grid_step_m)
     volume_m3, q_vent_m3ph, baseline_ppm = compute_transient_baseline_ppm(
         room_w, room_d, room_h, ach,
-        n_standing, n_sitting, n_lying,
-        elapsed_time_h
+        n_standing, n_sitting, n_lying, elapsed_time_h
     )
 
     Z = np.ones_like(X, dtype=float) * baseline_ppm
@@ -122,9 +131,14 @@ def compute_equipment_field(
         sigma = max(eq["radius_m"], grid_step_m * 1.2)
         dist2 = (X - cx) ** 2 + (Y - cy) ** 2
 
-        time_factor = (1.0 - math.exp(-ach * elapsed_time_h)) if (elapsed_time_h > 0 and ach > 0) else (1.0 if elapsed_time_h > 0 else 0.0)
-        reduction = (eq["ppm_reduction"] / max(1.0 + 0.1 * ach, 1.0)) * time_factor
+        if elapsed_time_h > 0 and ach > 0:
+            time_factor = (1.0 - math.exp(-ach * elapsed_time_h))
+        elif elapsed_time_h > 0:
+            time_factor = 1.0
+        else:
+            time_factor = 0.0
 
+        reduction = (eq["ppm_reduction"] / max(1.0 + 0.1 * ach, 1.0)) * time_factor
         Z -= reduction * np.exp(-dist2 / (2.0 * sigma ** 2))
 
     Z = np.clip(Z, OUTDOOR_CO2_PPM, 5000.0)
@@ -160,30 +174,13 @@ def generate_people_points(room_w: float, room_d: float, n: int, seed: int):
     return x, y
 
 def add_people_markers(fig: go.Figure, room_w: float, room_d: float, n_standing: int, n_sitting: int, n_lying: int) -> None:
-    total_people = n_standing + n_sitting + n_lying
-    if total_people <= 0:
-        return
-
-    scale = min(1.0, MAX_DISPLAY_PEOPLE / total_people)
-
-    display_standing = int(round(n_standing * scale))
-    display_sitting = int(round(n_sitting * scale))
-    display_lying = int(round(n_lying * scale))
-
-    if n_standing > 0 and display_standing == 0:
-        display_standing = 1
-    if n_sitting > 0 and display_sitting == 0:
-        display_sitting = 1
-    if n_lying > 0 and display_lying == 0:
-        display_lying = 1
-
-    if display_standing > 0:
-        x, y = generate_people_points(room_w, room_d, display_standing, seed=11)
+    if n_standing > 0:
+        x, y = generate_people_points(room_w, room_d, n_standing, seed=11)
         fig.add_trace(go.Scatter(
             x=x,
             y=y,
             mode="markers",
-            name=f"Standing ({display_standing}/{n_standing} shown)" if display_standing < n_standing else f"Standing ({n_standing})",
+            name=f"Standing ({n_standing})",
             marker=dict(
                 size=7,
                 color="rgba(20,20,20,0.95)",
@@ -193,13 +190,13 @@ def add_people_markers(fig: go.Figure, room_w: float, room_d: float, n_standing:
             hovertemplate="Standing person<br>x=%{x:.1f} m<br>y=%{y:.1f} m<extra></extra>"
         ))
 
-    if display_sitting > 0:
-        x, y = generate_people_points(room_w, room_d, display_sitting, seed=22)
+    if n_sitting > 0:
+        x, y = generate_people_points(room_w, room_d, n_sitting, seed=22)
         fig.add_trace(go.Scatter(
             x=x,
             y=y,
             mode="markers",
-            name=f"Sitting ({display_sitting}/{n_sitting} shown)" if display_sitting < n_sitting else f"Sitting ({n_sitting})",
+            name=f"Sitting ({n_sitting})",
             marker=dict(
                 size=8,
                 color="rgba(40,90,255,0.95)",
@@ -209,13 +206,13 @@ def add_people_markers(fig: go.Figure, room_w: float, room_d: float, n_standing:
             hovertemplate="Sitting person<br>x=%{x:.1f} m<br>y=%{y:.1f} m<extra></extra>"
         ))
 
-    if display_lying > 0:
-        x, y = generate_people_points(room_w, room_d, display_lying, seed=33)
+    if n_lying > 0:
+        x, y = generate_people_points(room_w, room_d, n_lying, seed=33)
         fig.add_trace(go.Scatter(
             x=x,
             y=y,
             mode="markers",
-            name=f"Lying ({display_lying}/{n_lying} shown)" if display_lying < n_lying else f"Lying ({n_lying})",
+            name=f"Lying ({n_lying})",
             marker=dict(
                 size=10,
                 color="rgba(0,150,90,0.95)",
@@ -282,7 +279,8 @@ def toggle_equipment(ix: int, iy: int, selected_tool: str) -> None:
         st.session_state.equipment_map[key] = selected_tool
 
 def trim_equipment_map(room_w: float, room_d: float, cell_size_m: float) -> None:
-    max_ix, max_iy = int(room_w // cell_size_m), int(room_d // cell_size_m)
+    max_ix = max(1, int(math.ceil(room_w / cell_size_m)))
+    max_iy = max(1, int(math.ceil(room_d / cell_size_m)))
     st.session_state.equipment_map = {
         k: v for k, v in st.session_state.equipment_map.items()
         if k[0] < max_ix and k[1] < max_iy
@@ -299,6 +297,49 @@ def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
     if area > 20_000:
         return max(current, 10.0)
     return current
+
+def cell_label(ix: int, iy: int) -> str:
+    eq_type = st.session_state.equipment_map.get((ix, iy))
+    if eq_type in EQUIPMENT_TYPES:
+        return EQUIPMENT_TYPES[eq_type]["label"]
+    return EMPTY_CELL_LABEL
+
+def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, selected_tool: str):
+    st.markdown("### Equipment Placement Grid")
+
+    nx = max(1, int(math.ceil(room_w / cell_size_m)))
+    ny = max(1, int(math.ceil(room_d / cell_size_m)))
+
+    viewport_cols = st.slider("Visible grid width (cells)", 5, min(20, nx), min(10, nx), key="viewport_cols")
+    viewport_rows = st.slider("Visible grid depth (cells)", 5, min(20, ny), min(10, ny), key="viewport_rows")
+
+    max_start_x = max(0, nx - viewport_cols)
+    max_start_y = max(0, ny - viewport_rows)
+
+    start_x = st.number_input("Grid start X index", min_value=0, max_value=max_start_x, value=0, step=1)
+    start_y = st.number_input("Grid start Y index", min_value=0, max_value=max_start_y, value=0, step=1)
+
+    st.caption(
+        f"Room grid: {nx} × {ny} cells | "
+        f"Showing X={start_x}..{start_x + viewport_cols - 1}, "
+        f"Y={start_y}..{start_y + viewport_rows - 1}"
+    )
+    st.caption("Click a cell to place the selected equipment. Use Eraser to remove.")
+
+    legend_cols = st.columns(4)
+    legend_cols[0].markdown(f"**{EQUIPMENT_TYPES['Supply']['label']} Supply**")
+    legend_cols[1].markdown(f"**{EQUIPMENT_TYPES['Exhaust']['label']} Exhaust**")
+    legend_cols[2].markdown(f"**{EQUIPMENT_TYPES['Purifier']['label']} Purifier**")
+    legend_cols[3].markdown(f"**{EMPTY_CELL_LABEL} Empty**")
+
+    for iy in range(start_y, min(start_y + viewport_rows, ny)):
+        cols = st.columns(viewport_cols + 1)
+        cols[0].markdown(f"**Y{iy}**")
+        for local_x, ix in enumerate(range(start_x, min(start_x + viewport_cols, nx)), start=1):
+            label = cell_label(ix, iy)
+            if cols[local_x].button(label, key=f"cell_{ix}_{iy}", use_container_width=True):
+                toggle_equipment(ix, iy, selected_tool)
+                st.rerun()
 
 # =========================================================
 # Sidebar
@@ -390,14 +431,9 @@ s3.metric("Grid Step", f"{grid_step_m:.1f} m")
 if recommended_cell > editor_step:
     st.warning(f"This room is large. Recommended Cell Size: {recommended_cell:.1f} m or larger.")
 
-if (n_standing + n_sitting + n_lying) > MAX_DISPLAY_PEOPLE:
-    st.info(
-        f"Too many people to render individually. "
-        f"Only about {MAX_DISPLAY_PEOPLE} markers are displayed for performance."
-    )
-
 st.plotly_chart(fig, use_container_width=False)
 
-st.markdown("### Equipment Map")
-st.caption("Equipment placement UI logic can remain connected to this state map as before.")
-st.write(st.session_state.equipment_map)
+render_equipment_editor(room_w, room_d, editor_step, selected_tool)
+
+with st.expander("Current equipment map"):
+    st.write(st.session_state.equipment_map)
