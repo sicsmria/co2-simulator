@@ -53,8 +53,12 @@ if "equipment_map" not in st.session_state:
 def get_adaptive_grid_step(room_w: float, room_d: float, target_max_cells: int = MAX_HEATMAP_CELLS) -> float:
     room_area = max(room_w * room_d, 1e-9)
     raw_step = math.sqrt(room_area / target_max_cells)
-    step = max(2.0, raw_step)
-    candidate_steps = [2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    
+    # 너무 작은 값 방지 (최소 단위를 1.0m로 축소)
+    step = max(1.0, raw_step)
+    
+    # 보기 좋은 구간으로 스냅 (1.0 옵션 추가)
+    candidate_steps = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
     for s in candidate_steps:
         if s >= step:
             return s
@@ -296,6 +300,8 @@ def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
         return max(current, 20.0)
     if area > 20_000:
         return max(current, 10.0)
+    if area > 5_000:
+        return max(current, 5.0) # 추가된 기준
     return current
 
 def cell_label(ix: int, iy: int) -> str:
@@ -439,8 +445,12 @@ st.sidebar.header("Equipment Editor")
 selected_tool = st.sidebar.radio(
     "Equipment Tool", ["Supply", "Exhaust", "Purifier", "Eraser"], index=0
 )
+
+# 옵션에 1.0, 2.0 추가 및 기본값을 1.0으로 변경
 editor_step = st.sidebar.select_slider(
-    "Cell Size (m)", options=[5.0, 10.0, 20.0, 50.0, 100.0], value=20.0
+    "Cell Size (m)", 
+    options=[1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0], 
+    value=1.0
 )
 
 if st.sidebar.button("Clear Equipments"):
