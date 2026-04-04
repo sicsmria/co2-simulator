@@ -332,19 +332,26 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
         min_rows, min(max_rows, st.session_state.viewport_rows)
     )
 
-    viewport_cols = st.slider(
-        "Visible grid width (cells)",
-        min_value=min_cols,
-        max_value=max_cols,
-        key="viewport_cols",
-    )
+    # [수정된 부분 1] min과 max가 같을 경우 슬라이더를 숨기고 값을 고정합니다.
+    if min_cols < max_cols:
+        viewport_cols = st.slider(
+            "Visible grid width (cells)",
+            min_value=min_cols,
+            max_value=max_cols,
+            key="viewport_cols",
+        )
+    else:
+        viewport_cols = min_cols
 
-    viewport_rows = st.slider(
-        "Visible grid depth (cells)",
-        min_value=min_rows,
-        max_value=max_rows,
-        key="viewport_rows",
-    )
+    if min_rows < max_rows:
+        viewport_rows = st.slider(
+            "Visible grid depth (cells)",
+            min_value=min_rows,
+            max_value=max_rows,
+            key="viewport_rows",
+        )
+    else:
+        viewport_rows = min_rows
 
     max_start_x = max(0, nx - viewport_cols)
     max_start_y = max(0, ny - viewport_rows)
@@ -357,20 +364,22 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
         st.session_state.start_y = 0
     st.session_state.start_y = max(0, min(max_start_y, st.session_state.start_y))
 
-    start_x = st.number_input(
-        "Grid start X index",
-        min_value=0,
-        max_value=max_start_x,
-        key="start_x",
-        step=1,
-    )
-    start_y = st.number_input(
-        "Grid start Y index",
-        min_value=0,
-        max_value=max_start_y,
-        key="start_y",
-        step=1,
-    )
+    # [수정된 부분 2] 스크롤할 여유 공간이 없을 경우 number_input을 숨깁니다.
+    c1, c2 = st.columns(2)
+    with c1:
+        if max_start_x > 0:
+            start_x = st.number_input(
+                "Grid start X index", min_value=0, max_value=max_start_x, key="start_x", step=1
+            )
+        else:
+            start_x = 0
+    with c2:
+        if max_start_y > 0:
+            start_y = st.number_input(
+                "Grid start Y index", min_value=0, max_value=max_start_y, key="start_y", step=1
+            )
+        else:
+            start_y = 0
 
     st.caption(
         f"Room grid: {nx} × {ny} cells | "
