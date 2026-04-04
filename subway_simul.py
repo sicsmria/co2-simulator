@@ -290,20 +290,6 @@ def trim_equipment_map(room_w: float, room_d: float) -> None:
         if k[0] < 11 and k[1] < 11
     }
 
-def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
-    area = room_w * room_d
-    if area > 2_000_000:
-        return max(current, 100.0)
-    if area > 500_000:
-        return max(current, 50.0)
-    if area > 100_000:
-        return max(current, 20.0)
-    if area > 20_000:
-        return max(current, 10.0)
-    if area > 5_000:
-        return max(current, 5.0) # 추가된 기준
-    return current
-
 def cell_label(ix: int, iy: int) -> str:
     eq_type = st.session_state.equipment_map.get((ix, iy))
     if eq_type in EQUIPMENT_TYPES:
@@ -349,6 +335,7 @@ def render_equipment_editor(room_w: float, room_d: float, selected_tool: str):
             if cols[ix + 1].button(label, key=f"cell_{ix}_{iy}", use_container_width=True):
                 toggle_equipment(ix, iy, selected_tool)
                 st.rerun()
+
 # =========================================================
 # Sidebar
 # =========================================================
@@ -386,23 +373,20 @@ selected_tool = st.sidebar.radio(
     "Equipment Tool", ["Supply", "Exhaust", "Purifier", "Eraser"], index=0
 )
 
-# 옵션에 1.0, 2.0 추가 및 기본값을 1.0으로 변경
-editor_step = st.sidebar.select_slider(
-    "Cell Size (m)", 
-    options=[1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0], 
-    value=1.0
-)
+# [수정] editor_step 관련 입력부 완전 제거
 
 if st.sidebar.button("Clear Equipments"):
     st.session_state.equipment_map = {}
 
-trim_equipment_map(room_w, room_d, editor_step)
+# [수정] 파라미터 2개만 전달
+trim_equipment_map(room_w, room_d)
 
 # =========================================================
 # Main compute
 # =========================================================
+# [수정] 파라미터 2개만 전달
 equipments = equipment_list_from_map(
-    st.session_state.equipment_map, room_w, room_d, editor_step
+    st.session_state.equipment_map, room_w, room_d
 )
 equipments_key = tuple(
     (e["type"], e["x"], e["y"], e["w"], e["d"]) for e in equipments
@@ -421,7 +405,7 @@ fig = make_heatmap_figure(
     int(n_standing), int(n_sitting), int(n_lying)
 )
 
-recommended_cell = recommend_cell_size(room_w, room_d, editor_step)
+# [수정] recommend_cell_size 관련 변수 및 경고 제거
 
 # =========================================================
 # Main UI
@@ -440,12 +424,10 @@ s1.metric("Ventilation Flow", f"{q_vent_m3ph:.1f} m³/h")
 s2.metric(f"CO2 at {elapsed_time_h}h", f"{baseline_ppm:.0f} ppm")
 s3.metric("Grid Step", f"{grid_step_m:.1f} m")
 
-if recommended_cell > editor_step:
-    st.warning(f"This room is large. Recommended Cell Size: {recommended_cell:.1f} m or larger.")
-
 st.plotly_chart(fig, use_container_width=False)
 
-render_equipment_editor(room_w, room_d, editor_step, selected_tool)
+# [수정] 파라미터 3개만 전달
+render_equipment_editor(room_w, room_d, selected_tool)
 
 with st.expander("Current equipment map"):
     st.write(st.session_state.equipment_map)
