@@ -316,83 +316,31 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     nx = max(1, int(math.ceil(room_w / cell_size_m)))
     ny = max(1, int(math.ceil(room_d / cell_size_m)))
 
-    max_cols = min(20, nx)
-    max_rows = min(20, ny)
+    # 한 화면에 보여줄 최대 칸 수 (너무 촘촘해지는 것 방지)
+    MAX_DISPLAY = 12 
+    
+    # 맵 크기가 작으면 전체를 보여주고, 크면 MAX_DISPLAY까지만 자름
+    viewport_cols = min(nx, MAX_DISPLAY)
+    viewport_rows = min(ny, MAX_DISPLAY)
 
-    min_cols = 1 if nx < 5 else 5
-    min_rows = 1 if ny < 5 else 5
+    need_pagination_x = nx > MAX_DISPLAY
+    need_pagination_y = ny > MAX_DISPLAY
 
-    default_cols = min(10, nx)
-    default_rows = min(10, ny)
-
-    # 이전 session_state 값이 현재 범위를 벗어나지 않도록 강제 보정
-    if "viewport_cols" not in st.session_state:
-        st.session_state.viewport_cols = default_cols
-    st.session_state.viewport_cols = max(
-        min_cols, min(max_cols, st.session_state.viewport_cols)
-    )
-
-    if "viewport_rows" not in st.session_state:
-        st.session_state.viewport_rows = default_rows
-    st.session_state.viewport_rows = max(
-        min_rows, min(max_rows, st.session_state.viewport_rows)
-    )
-
-    # [수정된 부분 1] min과 max가 같을 경우 슬라이더를 숨기고 값을 고정합니다.
-    if min_cols < max_cols:
-        viewport_cols = st.slider(
-            "Visible grid width (cells)",
-            min_value=min_cols,
-            max_value=max_cols,
-            key="viewport_cols",
-        )
+    # 맵이 커서 화면을 넘길 때만 이동 컨트롤(인풋) 표시
+    start_x, start_y = 0, 0
+    if need_pagination_x or need_pagination_y:
+        st.caption(f"💡 공간이 넓습니다 ({nx}×{ny} 칸). 아래 숫자를 조절해 그리드를 이동하세요.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if need_pagination_x:
+                start_x = st.number_input("X축 이동 (가로)", min_value=0, max_value=nx - viewport_cols, value=st.session_state.get("start_x", 0), step=1)
+                st.session_state.start_x = start_x
+        with c2:
+            if need_pagination_y:
+                start_y = st.number_input("Y축 이동 (세로)", min_value=0, max_value=ny - viewport_rows, value=st.session_state.get("start_y", 0), step=1)
+                st.session_state.start_y = start_y
     else:
-        viewport_cols = min_cols
-
-    if min_rows < max_rows:
-        viewport_rows = st.slider(
-            "Visible grid depth (cells)",
-            min_value=min_rows,
-            max_value=max_rows,
-            key="viewport_rows",
-        )
-    else:
-        viewport_rows = min_rows
-
-    max_start_x = max(0, nx - viewport_cols)
-    max_start_y = max(0, ny - viewport_rows)
-
-    if "start_x" not in st.session_state:
-        st.session_state.start_x = 0
-    st.session_state.start_x = max(0, min(max_start_x, st.session_state.start_x))
-
-    if "start_y" not in st.session_state:
-        st.session_state.start_y = 0
-    st.session_state.start_y = max(0, min(max_start_y, st.session_state.start_y))
-
-    # [수정된 부분 2] 스크롤할 여유 공간이 없을 경우 number_input을 숨깁니다.
-    c1, c2 = st.columns(2)
-    with c1:
-        if max_start_x > 0:
-            start_x = st.number_input(
-                "Grid start X index", min_value=0, max_value=max_start_x, key="start_x", step=1
-            )
-        else:
-            start_x = 0
-    with c2:
-        if max_start_y > 0:
-            start_y = st.number_input(
-                "Grid start Y index", min_value=0, max_value=max_start_y, key="start_y", step=1
-            )
-        else:
-            start_y = 0
-
-    st.caption(
-        f"Room grid: {nx} × {ny} cells | "
-        f"Showing X={start_x}..{start_x + viewport_cols - 1}, "
-        f"Y={start_y}..{start_y + viewport_rows - 1}"
-    )
-    st.caption("Click a cell to place the selected equipment. Use Eraser to remove.")
+        st.caption("💡 클릭하여 설비를 배치하거나 지우세요.")
 
     legend_cols = st.columns(4)
     legend_cols[0].markdown(f"**{EQUIPMENT_TYPES['Supply']['label']} Supply**")
@@ -400,15 +348,26 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     legend_cols[2].markdown(f"**{EQUIPMENT_TYPES['Purifier']['label']} Purifier**")
     legend_cols[3].markdown(f"**{EMPTY_CELL_LABEL} Empty**")
 
-    for iy in range(start_y, min(start_y + viewport_rows, ny)):
-        cols = st.columns(viewport_cols + 1)
-        cols[0].markdown(f"**Y{iy}**")
-        for local_x, ix in enumerate(range(start_x, min(start_x + viewport_cols, nx)), start=1):
+    # Y라벨 컬럼과 버튼 컬럼의 너비 비율 조정 (라벨 공간을 살짝 좁게, 버튼을 넓게)
+    col_ratios = [0.6] + [1.0] * viewport_cols
+
+    # 상단 X 좌표 라벨 표시 (보기 편하게 추가)
+    header_cols = st.columns(col_ratios)
+    header_cols[0].write("") # 좌측 상단 빈칸
+    for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
+        header_cols[local_x].markdown(f"<div style='text-align: center; color: gray; font-size: 0.85em; padding-bottom: 5px;'>X{ix}</div>", unsafe_allow_html=True)
+
+    # 본문 버튼 및 Y 좌표 라벨
+    for iy in range(start_y, start_y + viewport_rows):
+        cols = st.columns(col_ratios)
+        # Y라벨 간격을 버튼과 맞추기 위해 패딩 적용
+        cols[0].markdown(f"<div style='padding-top: 8px; font-weight: bold; color: gray; font-size: 0.9em;'>Y{iy}</div>", unsafe_allow_html=True)
+        
+        for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
             label = cell_label(ix, iy)
             if cols[local_x].button(label, key=f"cell_{ix}_{iy}", use_container_width=True):
                 toggle_equipment(ix, iy, selected_tool)
                 st.rerun()
-
 # =========================================================
 # Sidebar
 # =========================================================
