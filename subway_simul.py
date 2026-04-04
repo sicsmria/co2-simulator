@@ -74,19 +74,29 @@ def make_grid(room_w: float, room_d: float, step_m: float):
 
 def equipment_list_from_map(equipment_map: Dict, room_w: float, room_d: float, cell_size_m: float) -> List[Dict]:
     equipments = []
-    nx = max(1, int(math.ceil(room_w / cell_size_m)))
-    ny = max(1, int(math.ceil(room_d / cell_size_m)))
+    
+    nx = max(2, int(round(room_w / cell_size_m)) + 1)
+    ny = max(2, int(round(room_d / cell_size_m)) + 1)
+    
+    # 양 끝 모서리에 딱 맞도록 실제 노드 간 간격(dx, dy) 계산
+    dx = room_w / (nx - 1)
+    dy = room_d / (ny - 1)
 
     for (ix, iy), eq_type in equipment_map.items():
         if 0 <= ix < nx and 0 <= iy < ny and eq_type in EQUIPMENT_TYPES:
             eq = EQUIPMENT_TYPES[eq_type]
+            
+            # 교차점의 정확한 물리적 위치 (0 ~ room_w/room_d)
+            cx = ix * dx
+            cy = iy * dy
+            
             equipments.append({
                 "ix": ix,
                 "iy": iy,
-                "x": ix * cell_size_m,
-                "y": iy * cell_size_m,
-                "w": cell_size_m,
-                "d": cell_size_m,
+                "x": cx - 0.5, # 1m 규격 설비의 중심을 맞추기 위해 0.5m 이동
+                "y": cy - 0.5,
+                "w": 1.0,      # 1m x 1m 고정 규격
+                "d": 1.0,
                 "type": eq_type,
                 **eq
             })
@@ -283,11 +293,12 @@ def toggle_equipment(ix: int, iy: int, selected_tool: str) -> None:
         st.session_state.equipment_map[key] = selected_tool
 
 def trim_equipment_map(room_w: float, room_d: float, cell_size_m: float) -> None:
-    max_ix = max(1, int(math.ceil(room_w / cell_size_m)))
-    max_iy = max(1, int(math.ceil(room_d / cell_size_m)))
+    # 노드(교차점) 개수 계산: 양 끝 모서리를 포함하므로 최소 2개
+    nx = max(2, int(round(room_w / cell_size_m)) + 1)
+    ny = max(2, int(round(room_d / cell_size_m)) + 1)
     st.session_state.equipment_map = {
         k: v for k, v in st.session_state.equipment_map.items()
-        if k[0] < max_ix and k[1] < max_iy
+        if k[0] < nx and k[1] < ny
     }
 
 def recommend_cell_size(room_w: float, room_d: float, current: float) -> float:
@@ -313,20 +324,20 @@ def cell_label(ix: int, iy: int) -> str:
 def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, selected_tool: str):
     st.markdown("### Equipment Placement Grid")
 
-    nx = max(1, int(math.ceil(room_w / cell_size_m)))
-    ny = max(1, int(math.ceil(room_d / cell_size_m)))
-
-    # 한 화면에 보여줄 최대 칸 수 (너무 촘촘해지는 것 방지)
-    MAX_DISPLAY = 12 
+    nx = max(2, int(round(room_w / cell_size_m)) + 1)
+    ny = max(2, int(round(room_d / cell_size_m)) + 1)
     
-    # 맵 크기가 작으면 전체를 보여주고, 크면 MAX_DISPLAY까지만 자름
+    # 공간 크기에 따라 동적으로 결정된 셀 간격
+    dx = room_w / (nx - 1)
+    dy = room_d / (ny - 1)
+
+    MAX_DISPLAY = 12 
     viewport_cols = min(nx, MAX_DISPLAY)
     viewport_rows = min(ny, MAX_DISPLAY)
 
     need_pagination_x = nx > MAX_DISPLAY
     need_pagination_y = ny > MAX_DISPLAY
 
-    # 맵이 커서 화면을 넘길 때만 이동 컨트롤(인풋) 표시
     start_x, start_y = 0, 0
     if need_pagination_x or need_pagination_y:
         st.caption(f"💡 공간이 넓습니다 ({nx}×{ny} 칸). 아래 숫자를 조절해 그리드를 이동하세요.")
@@ -340,7 +351,7 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
                 start_y = st.number_input("Y축 이동 (세로)", min_value=0, max_value=ny - viewport_rows, value=st.session_state.get("start_y", 0), step=1)
                 st.session_state.start_y = start_y
     else:
-        st.caption("💡 클릭하여 설비를 배치하거나 지우세요.")
+        st.caption(f"💡 양 끝 모서리에 맞게 자동 분할되었습니다. (실제 간격: 가로 {dx:.1f}m, 세로 {dy:.1f}m)")
 
     legend_cols = st.columns(4)
     legend_cols[0].markdown(f"**{EQUIPMENT_TYPES['Supply']['label']} Supply**")
@@ -348,20 +359,19 @@ def render_equipment_editor(room_w: float, room_d: float, cell_size_m: float, se
     legend_cols[2].markdown(f"**{EQUIPMENT_TYPES['Purifier']['label']} Purifier**")
     legend_cols[3].markdown(f"**{EMPTY_CELL_LABEL} Empty**")
 
-    # Y라벨 컬럼과 버튼 컬럼의 너비 비율 조정 (라벨 공간을 살짝 좁게, 버튼을 넓게)
-    col_ratios = [0.6] + [1.0] * viewport_cols
+    # Y라벨 공간을 약간 넓혀서 미터(m) 표시가 잘 보이게 조정
+    col_ratios = [0.8] + [1.0] * viewport_cols
 
-    # 상단 X 좌표 라벨 표시 (보기 편하게 추가)
     header_cols = st.columns(col_ratios)
-    header_cols[0].write("") # 좌측 상단 빈칸
+    header_cols[0].write("") 
     for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
-        header_cols[local_x].markdown(f"<div style='text-align: center; color: gray; font-size: 0.85em; padding-bottom: 5px;'>X{ix}</div>", unsafe_allow_html=True)
+        actual_x = ix * dx
+        header_cols[local_x].markdown(f"<div style='text-align: center; color: gray; font-size: 0.8em; padding-bottom: 5px;'>X{ix}<br>({actual_x:.1f}m)</div>", unsafe_allow_html=True)
 
-    # 본문 버튼 및 Y 좌표 라벨
     for iy in range(start_y, start_y + viewport_rows):
         cols = st.columns(col_ratios)
-        # Y라벨 간격을 버튼과 맞추기 위해 패딩 적용
-        cols[0].markdown(f"<div style='padding-top: 8px; font-weight: bold; color: gray; font-size: 0.9em;'>Y{iy}</div>", unsafe_allow_html=True)
+        actual_y = iy * dy
+        cols[0].markdown(f"<div style='padding-top: 8px; font-weight: bold; color: gray; font-size: 0.85em;'>Y{iy}<br>({actual_y:.1f}m)</div>", unsafe_allow_html=True)
         
         for local_x, ix in enumerate(range(start_x, start_x + viewport_cols), start=1):
             label = cell_label(ix, iy)
