@@ -32,24 +32,25 @@ if "equipment_map" not in st.session_state:
 # =========================================================
 # Advanced Physics Engine
 # =========================================================
-def compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t, panic_mode, initial_blackout_t, depth_m):
+def compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t, panic_mode, initial_blackout_t, depth_m, grid_destroyed):
     vol = room_w * room_d * room_h
-    area = 2 * (room_w*room_d + room_w*room_h + room_d*room_h) # 벽면+천장+바닥 총면적
-    
-    # 1. 지중 온도 계산 (한국 기준 지하 10m 이하 15도 수렴)
+    area = 2 * (room_w*room_d + room_w*room_h + room_d*room_h) 
     ground_t = 20.0 - min(depth_m, 10.0) * 0.5 
     
-    # 2. 마찰 손실 전력 페널티 (깊이 25m당 연료 소모 2배)
-    power_multiplier = 1.0 + (depth_m / 25.0) if ach > 0 else 1.0
-    actual_blackout_t = initial_blackout_t / power_multiplier
+    # 전력망 파괴 여부에 따른 실제 블랙아웃 시간 계산
+    if grid_destroyed:
+        power_multiplier = 1.0 + (depth_m / 25.0) if ach > 0 else 1.0
+        actual_blackout_t = initial_blackout_t / power_multiplier
+    else:
+        actual_blackout_t = float('inf') # 전력 무한 공급
 
     multiplier = 3.0 if panic_mode else 1.0
     g_co2 = (n_st*0.021 + n_si*0.018 + n_ly*0.015) * multiplier
     g_ah = (n_st*75.0 + n_si*50.0 + n_ly*40.0) * multiplier
     g_heat_w = (n_st*75.0 + n_si*60.0 + n_ly*45.0) * multiplier
     
-    heat_rate_c_per_h = (g_heat_w * 3600) / (1200 * vol) # W -> °C/h 변환
-    k_wall = (2.0 * area * 3600) / (1200 * vol) # 열관류율(U=2.0) 기반 벽면 냉각계수
+    heat_rate_c_per_h = (g_heat_w * 3600) / (1200 * vol) 
+    k_wall = (2.0 * area * 3600) / (1200 * vol) 
 
     def get_co2_ah_deltas(current_t, current_ach):
         q_vent = max(current_ach * vol, 0.001)
@@ -67,7 +68,6 @@ def compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t,
         else:
             return start_t + heat_rate_c_per_h * duration
 
-    # 시간대별(블랙아웃 전/후) 상태 적분
     if t <= actual_blackout_t:
         d_c, d_a = get_co2_ah_deltas(t, ach)
         base_t = get_temp(ground_t, t, ach)
@@ -83,7 +83,6 @@ def compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t,
     base_a = OUTDOOR_AH_G_M3 + d_a
     base_o2 = OUTDOOR_O2_PCT - (d_c * 1.2 / 10000.0) 
     
-    # 3. 결로 판별을 위한 벽면 포화 절대습도 계산
     sat_ah_wall = 5.018 + 0.3232*ground_t + 0.0081847*(ground_t**2) + 0.00031243*(ground_t**3)
     condensation = base_a > sat_ah_wall
 
@@ -95,19 +94,21 @@ def get_grid(room_w, room_d):
     nx, ny = int(room_w/step)+1, int(room_d/step)+1
     return np.meshgrid(np.linspace(0, room_w, nx), np.linspace(0, room_d, ny)), step
 
-def make_trend_charts(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t, panic_mode, initial_blackout_t, depth_m):
+def make_trend_charts(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t, panic_mode, initial_blackout_t, depth_m, grid_destroyed):
     times = np.linspace(0, 24, 49)
     co2_v, o2_v, ah_v, temp_v = [], [], [], []
-    act_blackout = 24.0
+    act_blackout = float('inf')
     for t in times:
-        _, c, a, temp, o2, act_b, _ = compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t, panic_mode, initial_blackout_t, depth_m)
+        _, c, a, temp, o2, act_b, _ = compute_transient_baseline(room_w, room_d, room_h, ach, n_st, n_si, n_ly, t, panic_mode, initial_blackout_t, depth_m, grid_destroyed)
         co2_v.append(c); o2_v.append(o2); ah_v.append(a); temp_v.append(temp)
         act_blackout = act_b
         
     fig1 = go.Figure()
     fig1.add_trace(go.Scatter(x=times, y=co2_v, name="CO2 (ppm)", yaxis="y1", line=dict(color="orangered", width=3)))
     fig1.add_trace(go.Scatter(x=times, y=o2_v, name="O2 (%)", yaxis="y2", line=dict(color="green", width=3, dash='dot')))
-    fig1.add_vline(x=current_t, line_width=2, line_dash="dash"); fig1.add_vline(x=act_blackout, line_width=2, line_color="red")
+    fig1.add_vline(x=current_t, line_width=2, line_dash="dash")
+    if grid_destroyed and act_blackout <= 24.0:
+        fig1.add_vline(x=act_blackout, line_width=2, line_color="red")
     fig1.update_layout(title="Air Quality (CO2 & Oxygen)", height=250, margin=dict(l=0, r=0, t=30, b=0), hovermode="x unified",
                        yaxis=dict(title=dict(text="CO2 (ppm)", font=dict(color="orangered")), tickfont=dict(color="orangered")),
                        yaxis2=dict(title=dict(text="O2 (%)", font=dict(color="green")), tickfont=dict(color="green"), overlaying="y", side="right"))
@@ -115,7 +116,9 @@ def make_trend_charts(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t, 
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=times, y=temp_v, name="Temp (°C)", yaxis="y1", line=dict(color="firebrick", width=3)))
     fig2.add_trace(go.Scatter(x=times, y=ah_v, name="Hum (g/m³)", yaxis="y2", line=dict(color="royalblue", width=3, dash='dot')))
-    fig2.add_vline(x=current_t, line_width=2, line_dash="dash"); fig2.add_vline(x=act_blackout, line_width=2, line_color="red")
+    fig2.add_vline(x=current_t, line_width=2, line_dash="dash")
+    if grid_destroyed and act_blackout <= 24.0:
+        fig2.add_vline(x=act_blackout, line_width=2, line_color="red")
     fig2.update_layout(title="Thermal Comfort (Temp & Humidity)", height=250, margin=dict(l=0, r=0, t=30, b=0), hovermode="x unified",
                        yaxis=dict(title=dict(text="Temp (°C)", font=dict(color="firebrick")), tickfont=dict(color="firebrick")),
                        yaxis2=dict(title=dict(text="Abs. Hum (g/m³)", font=dict(color="royalblue")), tickfont=dict(color="royalblue"), overlaying="y", side="right"))
@@ -171,15 +174,21 @@ room_h = st.sidebar.slider("Height (m)", 2.0, 6.0, 3.0)
 
 st.sidebar.header("🌪️ HVAC System")
 ach = st.sidebar.slider("Ventilation (ACH)", 0.0, 15.0, 2.0)
-initial_blackout_t = st.sidebar.slider("⚡ Max Fuel Time (Hours)", 0.0, 24.0, 24.0, help="연료량 기준 최대 발전 시간입니다. 깊이가 깊어지면 실제 가동 시간이 단축됩니다.")
+
+st.sidebar.header("🚨 Scenario Setup")
+grid_destroyed = st.sidebar.checkbox("💥 외부 전력망 파괴 (Blackout Mode)", value=True, help="체크 해제 시 외부 전력이 무한 공급되는 평상시(Peacetime)로 시뮬레이션합니다.")
+
+if grid_destroyed:
+    initial_blackout_t = st.sidebar.slider("⚡ Max Fuel Time (Hours)", 0.0, 24.0, 24.0, help="지정된 시간에 비상 발전기 연료가 고갈됩니다.")
+else:
+    initial_blackout_t = 24.0
+
+panic_mode = st.sidebar.checkbox("😱 Panic Mode (Emissions x3)")
 
 st.sidebar.header("👥 Population")
 n_st = st.sidebar.number_input("Standing", 0, 5000, 100)
 n_si = st.sidebar.number_input("Sitting", 0, 5000, 50)
 n_ly = st.sidebar.number_input("Lying", 0, 5000, 10)
-
-st.sidebar.header("🚨 Emergency Scenario")
-panic_mode = st.sidebar.checkbox("Panic Mode (Emissions x3)")
 
 st.sidebar.header("🛠️ Tools")
 tool = st.sidebar.radio("Equipment", ["Supply", "Exhaust", "Purifier", "Eraser"])
@@ -188,26 +197,29 @@ if st.sidebar.button("Clear All"): st.session_state.equipment_map = {}
 # =========================================================
 # Main UI
 # =========================================================
-st.title("Ultimate Underground Simulator (Depth/O2/Condensation)")
+st.title("Ultimate Underground Simulator (Peacetime vs Wartime)")
 
 elapsed_t = st.select_slider("🕒 Time Machine (Hours Elapsed)", options=np.round(np.linspace(0, 24, 241), 1), value=2.0)
 
 vol, base_c, base_a, base_t, base_o2, act_blackout, is_condensation = compute_transient_baseline(
-    room_w, room_d, room_h, ach, n_st, n_si, n_ly, elapsed_t, panic_mode, initial_blackout_t, depth_m
+    room_w, room_d, room_h, ach, n_st, n_si, n_ly, elapsed_t, panic_mode, initial_blackout_t, depth_m, grid_destroyed
 )
 current_ach = ach if elapsed_t <= act_blackout else 0.0
 
 # 각종 경고 및 알림
-if depth_m > 0 and ach > 0:
-    st.info(f"💡 **지하 {depth_m}m 마찰 손실 적용:** 송풍기 과부하로 인해 연료가 더 빨리 소모되어, 발전기 정지 시점이 **{initial_blackout_t}시간 -> {act_blackout:.1f}시간**으로 앞당겨졌습니다.")
+if grid_destroyed:
+    if depth_m > 0 and ach > 0:
+        st.info(f"💡 **지하 {depth_m}m 마찰 손실 적용:** 송풍기 과부하로 발전기 연료가 빨리 소모되어, 정전 시점이 **{initial_blackout_t}시간 -> {act_blackout:.1f}시간**으로 앞당겨졌습니다.")
+    if elapsed_t > act_blackout:
+        st.error(f"⚡ **블랙아웃 발생:** 비상 발전기 연료 고갈로 모든 환기 설비가 정지되었습니다. (현재 환기율: 0 ACH)")
+else:
+    st.success("🔌 **안정적인 외부 전력 공급 중:** 연료 고갈 걱정 없이 공조 시스템이 가동됩니다.")
 
-if elapsed_t > act_blackout:
-    st.error(f"⚡ **블랙아웃 발생:** 전력이 끊겨 모든 환기 설비가 정지되었습니다. (현재 환기율: 0 ACH)")
-elif panic_mode:
-    st.warning("⚠️ **패닉 모드:** 사람들의 호흡량과 발열량이 3배로 폭증한 상태입니다.")
+if panic_mode:
+    st.warning("⚠️ **패닉 모드:** 극도의 긴장으로 사람들의 호흡량과 발열량이 3배 폭증했습니다.")
 
 if is_condensation:
-    st.error(f"💧 **결로 발생 경고:** 차가운 콘크리트 벽면 온도(약 {20.0-min(depth_m, 10)*0.5:.1f}°C) 대비 절대습도가 포화 상태를 넘어, 벽면과 천장에 물방울이 맺히고 있습니다. 곰팡이와 질병 확산에 주의하세요.")
+    st.error(f"💧 **결로 발생 경고:** 차가운 콘크리트 벽면 온도(약 {20.0-min(depth_m, 10)*0.5:.1f}°C) 대비 절대습도가 포화 상태를 넘어 벽면에 물이 맺히고 있습니다.")
 
 if base_o2 < 18.0:
     st.error(f"☠️ **질식 위험!** 산소 농도가 {base_o2:.1f}%로 치명적인 수준입니다. (18% 미만)")
@@ -238,7 +250,7 @@ with st.expander("📊 HVAC Capacity Analyzer (수용 한계 역산 엔진)", ex
     else:
         if elapsed_t > 0:
             limit_n_normal = (delta_c * vol) / (1e6 * avg_g_co2 * elapsed_t)
-            desc = f"완전 밀폐 시 {elapsed_t}시간 후 정확히 {target_co2}ppm에 도달하는 한계 인원"
+            desc = f"환기 중단(ACH 0) 시 {elapsed_t}시간 후 정확히 {target_co2}ppm에 도달하는 한계 인원"
         else:
             limit_n_normal = float('inf')
             desc = "경과 시간이 0이므로 무한대"
@@ -254,7 +266,7 @@ with st.expander("📊 HVAC Capacity Analyzer (수용 한계 역산 엔진)", ex
 
 # 트렌드 차트
 c1, c2 = st.columns(2)
-fig_air, fig_therm = make_trend_charts(room_w, room_d, room_h, ach, n_st, n_si, n_ly, elapsed_t, panic_mode, initial_blackout_t, depth_m)
+fig_air, fig_therm = make_trend_charts(room_w, room_d, room_h, ach, n_st, n_si, n_ly, elapsed_t, panic_mode, initial_blackout_t, depth_m, grid_destroyed)
 c1.plotly_chart(fig_air, use_container_width=True)
 c2.plotly_chart(fig_therm, use_container_width=True)
 
