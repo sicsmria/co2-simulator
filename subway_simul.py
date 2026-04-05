@@ -68,7 +68,6 @@ def make_trend_chart(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t):
     # 현재 선택 시간 수직선 표시
     fig.add_vline(x=current_t, line_width=2, line_dash="dash", line_color="black")
     
-    # 최신 Plotly 문법에 맞게 yaxis, yaxis2의 title 및 font 구조 수정
     fig.update_layout(
         title="24-Hour Concentration Trend",
         xaxis=dict(title="Hours Elapsed", range=[0, 24]),
@@ -88,9 +87,6 @@ def make_trend_chart(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t):
     )
     return fig
 
-# (기타 Heatmap 및 Editor 함수는 이전과 동일한 로직을 유지하되 가독성을 위해 최적화)
-# ... [중략: equipment_list_from_map, add_equipment_shapes, add_people_markers 등] ...
-
 def equipment_list_from_map(equipment_map, room_w, room_d):
     eqs = []
     nx, ny = 11, 11
@@ -101,31 +97,69 @@ def equipment_list_from_map(equipment_map, room_w, room_d):
             eqs.append({"ix": ix, "iy": iy, "x": (ix*dx)-0.5, "y": (iy*dy)-0.5, "w": 1.0, "d": 1.0, "type": eq_type, **eq})
     return eqs
 
+def get_non_overlapping_points(room_w, room_d, n_st, n_si, n_ly, seed=42):
+    """방 크기와 인원수에 맞춰 절대 겹치지 않는 좌표를 생성하는 공간 분할 알고리즘"""
+    total_n = n_st + n_si + n_ly
+    if total_n == 0:
+        return [], [], [], [], [], []
+
+    # 1. 방의 가로/세로 비율에 맞춰 가상의 격자(Grid) 개수 계산
+    aspect_ratio = room_w / room_d
+    nx = max(1, int(math.ceil(math.sqrt(total_n * aspect_ratio))))
+    ny = max(1, int(math.ceil(total_n / nx)))
+
+    # 인원수보다 격자가 모자라지 않도록 보정
+    while nx * ny < total_n:
+        if nx / room_w < ny / room_d: nx += 1
+        else: ny += 1
+
+    dx = room_w / nx
+    dy = room_d / ny
+
+    # 2. 모든 격자의 중심점 좌표 생성
+    points = [(ix * dx + dx / 2, iy * dy + dy / 2) for ix in range(nx) for iy in range(ny)]
+
+    # 3. 무작위로 섞은 뒤 필요한 인원수만큼만 뽑기
+    rng = np.random.default_rng(seed)
+    rng.shuffle(points)
+    selected_points = points[:total_n]
+
+    # 4. 일렬로 서 있는 것을 방지하기 위해 자기 격자 크기의 1/3 내에서만 무작위 이동 (겹침 원천 차단)
+    jitter_x = rng.uniform(-dx/3, dx/3, total_n)
+    jitter_y = rng.uniform(-dy/3, dy/3, total_n)
+
+    final_x = [p[0] + jx for p, jx in zip(selected_points, jitter_x)]
+    final_y = [p[1] + jy for p, jy in zip(selected_points, jitter_y)]
+
+    # 5. 서있는/앉은/누운 사람 배열로 쪼개서 반환
+    return (
+        final_x[:n_st], final_y[:n_st],
+        final_x[n_st:n_st+n_si], final_y[n_st:n_st+n_si],
+        final_x[n_st+n_si:], final_y[n_st+n_si:]
+    )
+
 def make_heatmap_fig(room_w, room_d, X, Y, Z, eqs, t, n_st, n_si, n_ly, title, scale, zmin, zmax, cbtitle):
     fig = go.Figure(go.Heatmap(x=X[0], y=Y[:,0], z=Z, colorscale=scale, zmin=zmin, zmax=zmax, colorbar=dict(title=cbtitle), zsmooth="best"))
     
-    # 설비 마커 추가
     for eq in eqs:
         fig.add_shape(type="rect", x0=eq["x"]+0.15, y0=eq["y"]+0.15, x1=eq["x"]+0.85, y1=eq["y"]+0.85, line=dict(color="black", width=1), fillcolor=eq["color"])
         fig.add_trace(go.Scatter(x=[eq["x"]+0.5], y=[eq["y"]+0.5], mode="text", text=[eq["symbol"]], textfont=dict(color="white"), showlegend=False))
     
-    # 사람 마커 무작위 배치 함수 (X, Y 좌표를 하나의 난수 생성기로 순차적으로 뽑아 중복 방지)
-    def add_people(n, seed, color, symbol, name):
-        if n > 0:
-            rng = np.random.default_rng(seed)
-            rx = rng.uniform(0.5, max(0.5, room_w-0.5), n)
-            ry = rng.uniform(0.5, max(0.5, room_d-0.5), n)
-            fig.add_trace(go.Scatter(
-                x=rx, y=ry, mode="markers", 
-                marker=dict(size=6, color=color, symbol=symbol, line=dict(width=0.5, color="white")), 
-                name=f"{name} ({n})", hoverinfo="name"
-            ))
+    # 겹치지 않는 좌표 가져오기
+    st_x, st_y, si_x, si_y, ly_x, ly_y = get_non_overlapping_points(room_w, room_d, n_st, n_si, n_ly, seed=99)
 
-    # 서있는 사람(원), 앉은 사람(사각형), 누운 사람(마름모) 무작위 배치
-    add_people(n_st, 11, "rgba(20,20,20,0.9)", "circle", "Standing")
-    add_people(n_si, 22, "rgba(40,90,255,0.9)", "square", "Sitting")
-    add_people(n_ly, 33, "rgba(0,150,90,0.9)", "diamond-wide", "Lying")
-    
+    # 이전 코드에 있던 '인원이 많아지면 점을 작게 만드는 로직'을 완전히 삭제했습니다.
+    # 사람의 자세(서있음/앉음/누움)가 차지하는 면적에 맞춰 고정된 크기(6, 8, 11)를 부여합니다.
+    if n_st > 0:
+        fig.add_trace(go.Scatter(x=st_x, y=st_y, mode="markers", name=f"Standing ({n_st})", 
+                                 marker=dict(size=6, color="rgba(20,20,20,0.9)", symbol="circle", line=dict(width=0.5, color="white")), hoverinfo="name"))
+    if n_si > 0:
+        fig.add_trace(go.Scatter(x=si_x, y=si_y, mode="markers", name=f"Sitting ({n_si})", 
+                                 marker=dict(size=8, color="rgba(40,90,255,0.9)", symbol="square", line=dict(width=0.5, color="white")), hoverinfo="name"))
+    if n_ly > 0:
+        fig.add_trace(go.Scatter(x=ly_x, y=ly_y, mode="markers", name=f"Lying ({n_ly})", 
+                                 marker=dict(size=11, color="rgba(0,150,90,0.9)", symbol="diamond-wide", line=dict(width=0.5, color="white")), hoverinfo="name"))
+
     fig.update_layout(width=900, height=500, title=f"{title} (T={t:.1f}h)", margin=dict(l=20, r=20, t=40, b=20))
     fig.update_yaxes(autorange="reversed", scaleanchor="x", scaleratio=1)
     return fig
@@ -140,7 +174,7 @@ room_h = st.sidebar.slider("Height (m)", 2.0, 6.0, 3.0)
 ach = st.sidebar.slider("Ventilation (ACH)", 0.0, 15.0, 2.0)
 
 st.sidebar.header("👥 Population (Max 5,000 per type)")
-n_st = st.sidebar.number_input("Standing", 0, 5000, 100) # 2000 -> 5000으로 수정
+n_st = st.sidebar.number_input("Standing", 0, 5000, 100)
 n_si = st.sidebar.number_input("Sitting", 0, 5000, 50)
 n_ly = st.sidebar.number_input("Lying", 0, 5000, 10)
 
@@ -181,7 +215,6 @@ with t2:
     st.plotly_chart(make_heatmap_fig(room_w, room_d, X, Y, Z_a, eqs, elapsed_t, n_st, n_si, n_ly, "Abs. Humidity (g/m³)", "Tealrose", 5, 30, "g/m³"), use_container_width=False)
 
 # 5. 그리드 에디터
-# (이전의 render_equipment_editor 로직 동일 사용)
 st.divider()
 nx, ny = 11, 11
 dx, dy = room_w/10, room_d/10
