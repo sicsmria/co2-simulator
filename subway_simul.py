@@ -68,12 +68,23 @@ def make_trend_chart(room_w, room_d, room_h, ach, n_st, n_si, n_ly, current_t):
     # 현재 선택 시간 수직선 표시
     fig.add_vline(x=current_t, line_width=2, line_dash="dash", line_color="black")
     
+    # 최신 Plotly 문법에 맞게 yaxis, yaxis2의 title 및 font 구조 수정
     fig.update_layout(
         title="24-Hour Concentration Trend",
         xaxis=dict(title="Hours Elapsed", range=[0, 24]),
-        yaxis=dict(title="CO2 Concentration (ppm)", titlefont=dict(color="orangered"), tickfont=dict(color="orangered")),
-        yaxis2=dict(title="Absolute Humidity (g/m³)", titlefont=dict(color="royalblue"), tickfont=dict(color="royalblue"), overlaying="y", side="right"),
-        height=300, margin=dict(l=20, r=20, t=50, b=20), hovermode="x unified"
+        yaxis=dict(
+            title=dict(text="CO2 Concentration (ppm)", font=dict(color="orangered")), 
+            tickfont=dict(color="orangered")
+        ),
+        yaxis2=dict(
+            title=dict(text="Absolute Humidity (g/m³)", font=dict(color="royalblue")), 
+            tickfont=dict(color="royalblue"), 
+            overlaying="y", 
+            side="right"
+        ),
+        height=300, 
+        margin=dict(l=20, r=20, t=50, b=20), 
+        hovermode="x unified"
     )
     return fig
 
