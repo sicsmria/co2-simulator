@@ -139,10 +139,10 @@ room_d = st.sidebar.slider("Depth (m)", 5.0, 500.0, 50.0)
 room_h = st.sidebar.slider("Height (m)", 2.0, 6.0, 3.0)
 ach = st.sidebar.slider("Ventilation (ACH)", 0.0, 15.0, 2.0)
 
-st.sidebar.header("👥 Population")
-n_st = st.sidebar.number_input("Standing", 0, 2000, 50)
-n_si = st.sidebar.number_input("Sitting", 0, 2000, 30)
-n_ly = st.sidebar.number_input("Lying", 0, 2000, 10)
+st.sidebar.header("👥 Population (Max 5,000 per type)")
+n_st = st.sidebar.number_input("Standing", 0, 5000, 100) # 2000 -> 5000으로 수정
+n_si = st.sidebar.number_input("Sitting", 0, 5000, 50)
+n_ly = st.sidebar.number_input("Lying", 0, 5000, 10)
 
 st.sidebar.header("🛠️ Tools")
 tool = st.sidebar.radio("Equipment", ["Supply", "Exhaust", "Purifier", "Eraser"])
