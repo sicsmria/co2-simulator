@@ -103,14 +103,28 @@ def equipment_list_from_map(equipment_map, room_w, room_d):
 
 def make_heatmap_fig(room_w, room_d, X, Y, Z, eqs, t, n_st, n_si, n_ly, title, scale, zmin, zmax, cbtitle):
     fig = go.Figure(go.Heatmap(x=X[0], y=Y[:,0], z=Z, colorscale=scale, zmin=zmin, zmax=zmax, colorbar=dict(title=cbtitle), zsmooth="best"))
+    
+    # 설비 마커 추가
     for eq in eqs:
         fig.add_shape(type="rect", x0=eq["x"]+0.15, y0=eq["y"]+0.15, x1=eq["x"]+0.85, y1=eq["y"]+0.85, line=dict(color="black", width=1), fillcolor=eq["color"])
         fig.add_trace(go.Scatter(x=[eq["x"]+0.5], y=[eq["y"]+0.5], mode="text", text=[eq["symbol"]], textfont=dict(color="white"), showlegend=False))
     
-    # 사람 마커 추가 (이전 함수 통합 호출)
-    if n_st > 0: 
-        rx, ry = np.random.default_rng(11).uniform(0.5, room_w-0.5, n_st), np.random.default_rng(11).uniform(0.5, room_d-0.5, n_st)
-        fig.add_trace(go.Scatter(x=rx, y=ry, mode="markers", marker=dict(size=6, color="black"), name="Standing"))
+    # 사람 마커 무작위 배치 함수 (X, Y 좌표를 하나의 난수 생성기로 순차적으로 뽑아 중복 방지)
+    def add_people(n, seed, color, symbol, name):
+        if n > 0:
+            rng = np.random.default_rng(seed)
+            rx = rng.uniform(0.5, max(0.5, room_w-0.5), n)
+            ry = rng.uniform(0.5, max(0.5, room_d-0.5), n)
+            fig.add_trace(go.Scatter(
+                x=rx, y=ry, mode="markers", 
+                marker=dict(size=6, color=color, symbol=symbol, line=dict(width=0.5, color="white")), 
+                name=f"{name} ({n})", hoverinfo="name"
+            ))
+
+    # 서있는 사람(원), 앉은 사람(사각형), 누운 사람(마름모) 무작위 배치
+    add_people(n_st, 11, "rgba(20,20,20,0.9)", "circle", "Standing")
+    add_people(n_si, 22, "rgba(40,90,255,0.9)", "square", "Sitting")
+    add_people(n_ly, 33, "rgba(0,150,90,0.9)", "diamond-wide", "Lying")
     
     fig.update_layout(width=900, height=500, title=f"{title} (T={t:.1f}h)", margin=dict(l=20, r=20, t=40, b=20))
     fig.update_yaxes(autorange="reversed", scaleanchor="x", scaleratio=1)
