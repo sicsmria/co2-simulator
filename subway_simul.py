@@ -305,3 +305,11 @@ for iy in range(ny):
             if tool == "Eraser": st.session_state.equipment_map.pop((ix, iy), None)
             else: st.session_state.equipment_map[(ix, iy)] = tool
             st.rerun()
+
+# =========================================================
+# Main UI
+# =========================================================
+st.caption("@sicsmria") # 이니셜 추가
+st.title("Ultimate Underground Simulator (Peacetime vs Wartime)")
+
+elapsed_t = st.select_slider("🕒 Time Machine (Hours Elapsed)", options=np.round(np.linspace(0, 24, 241), 1), value=2.0)
