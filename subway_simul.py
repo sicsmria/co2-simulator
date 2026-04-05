@@ -198,11 +198,7 @@ if st.sidebar.button("Clear All"): st.session_state.equipment_map = {}
 # Main UI
 # =========================================================
 
-st.caption("@sicsmria")  # <--- 이 줄을 여기에 추가하세요!
-st.title("Ultimate Underground Simulator (Peacetime vs Wartime)")
-
-elapsed_t = st.select_slider("🕒 Time Machine (Hours Elapsed)", options=np.round(np.linspace(0, 24, 241), 1), value=2.0)
-
+st.caption("@sicsmria")  
 st.title("Ultimate Underground Simulator (Peacetime vs Wartime)")
 
 elapsed_t = st.select_slider("🕒 Time Machine (Hours Elapsed)", options=np.round(np.linspace(0, 24, 241), 1), value=2.0)
