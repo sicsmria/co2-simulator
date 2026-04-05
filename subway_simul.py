@@ -198,7 +198,7 @@ if st.sidebar.button("Clear All"): st.session_state.equipment_map = {}
 # Main UI
 # =========================================================
 st.caption("@sicsmria")
-st.title("Ultimate Underground Simulator (Peacetime vs Wartime)")
+st.title("Underground Simulator")
 
 elapsed_t = st.select_slider("🕒 Time Machine (Hours Elapsed)", options=np.round(np.linspace(0, 24, 241), 1), value=2.0)
 
