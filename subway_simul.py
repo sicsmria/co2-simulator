@@ -159,7 +159,21 @@ def make_heatmap_fig(room_w, room_d, X, Y, Z, eqs, t, n_st, n_si, n_ly, title, s
     if n_st > 0: fig.add_trace(go.Scatter(x=st_x, y=st_y, mode="markers", name=f"Standing ({n_st})", marker=dict(size=6, color="rgba(20,20,20,0.9)", symbol="circle", line=dict(width=0.5, color="white")), hoverinfo="name"))
     if n_si > 0: fig.add_trace(go.Scatter(x=si_x, y=si_y, mode="markers", name=f"Sitting ({n_si})", marker=dict(size=8, color="rgba(40,90,255,0.9)", symbol="square", line=dict(width=0.5, color="white")), hoverinfo="name"))
     if n_ly > 0: fig.add_trace(go.Scatter(x=ly_x, y=ly_y, mode="markers", name=f"Lying ({n_ly})", marker=dict(size=11, color="rgba(0,150,90,0.9)", symbol="diamond-wide", line=dict(width=0.5, color="white")), hoverinfo="name"))
-    fig.update_layout(width=900, height=500, title=f"{title} (T={t:.1f}h)", margin=dict(l=20, r=20, t=40, b=20))
+   fig.update_layout(
+        width=900, 
+        height=600, # 범례가 들어갈 공간을 위해 높이를 약간 키움
+        title=f"{title} (T={t:.1f}h)", 
+        margin=dict(l=20, r=100, t=40, b=100), # 하단과 오른쪽 여유 공간 확보
+        
+        # 🟢 범례 위치 조정 (그래프 아래쪽 중앙으로 이동)
+        legend=dict(
+            orientation="h",       # 가로 방향으로 배치
+            yanchor="bottom",
+            y=-0.3,                # 그래프 아래로 이동
+            xanchor="center",
+            x=0.5
+        )
+    )
     fig.update_yaxes(autorange="reversed", scaleanchor="x", scaleratio=1)
     return fig
 
