@@ -340,19 +340,32 @@ with t1: st.plotly_chart(make_heatmap_fig(room_w, room_d, X, Y, Z_c, eqs, elapse
 with t2: st.plotly_chart(make_heatmap_fig(room_w, room_d, X, Y, Z_a, eqs, elapsed_t, n_st, n_si, n_ly, "Humidity (g/m³)", "Tealrose", 5, 30, "g/m³"), use_container_width=False)
 with t3: st.plotly_chart(make_heatmap_fig(room_w, room_d, X, Y, Z_t, eqs, elapsed_t, n_st, n_si, n_ly, "Temperature (°C)", "Thermal", 15, 45, "°C"), use_container_width=False)
 
-# 에디터
+# 에디터 (접기/펴기 기능 추가)
 st.divider()
-nx, ny, dx, dy = 11, 11, room_w/10, room_d/10
-st.markdown(f"### 📍 Equipment Placement Grid")
-legend_cols = st.columns(5)
-for i, (k, v) in enumerate(EQUIPMENT_TYPES.items()): legend_cols[i].write(f"{v['label']} {k}")
-for iy in range(ny):
-    cols = st.columns([0.8] + [1]*nx)
-    cols[0].write(f"Y{iy}\n({iy*dy:.0f}m)")
-    for ix in range(nx):
-        et = st.session_state.equipment_map.get((ix, iy))
-        lbl = EQUIPMENT_TYPES[et]["label"] if et in EQUIPMENT_TYPES else "·"
-        if cols[ix+1].button(lbl, key=f"c_{ix}_{iy}", use_container_width=True):
-            if tool == "Eraser": st.session_state.equipment_map.pop((ix, iy), None)
-            else: st.session_state.equipment_map[(ix, iy)] = tool
-            st.rerun()
+
+# expander를 사용하여 그리드를 숨기거나 나타낼 수 있게 함
+with st.expander("📍 Equipment Placement Grid (장비 배치 에디터)", expanded=False):
+    nx, ny, dx, dy = 11, 11, room_w/10, room_d/10
+    
+    st.markdown("설비를 배치하려면 아래 그리드의 버튼을 클릭하세요.")
+    
+    # 범례 표시
+    legend_cols = st.columns(5)
+    for i, (k, v) in enumerate(EQUIPMENT_TYPES.items()): 
+        legend_cols[i].write(f"{v['label']} {k}")
+    
+    st.write("") # 간격 조절
+
+    # 그리드 버튼 생성
+    for iy in range(ny):
+        cols = st.columns([0.8] + [1]*nx)
+        cols[0].write(f"Y{iy}\n({iy*dy:.0f}m)")
+        for ix in range(nx):
+            et = st.session_state.equipment_map.get((ix, iy))
+            lbl = EQUIPMENT_TYPES[et]["label"] if et in EQUIPMENT_TYPES else "·"
+            if cols[ix+1].button(lbl, key=f"c_{ix}_{iy}", use_container_width=True):
+                if tool == "Eraser": 
+                    st.session_state.equipment_map.pop((ix, iy), None)
+                else: 
+                    st.session_state.equipment_map[(ix, iy)] = tool
+                st.rerun()
